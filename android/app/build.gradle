@@ -1,0 +1,72 @@
+plugins {
+    id "com.android.application"
+    id "kotlin-android"
+    // El Flutter Gradle Plugin debe aplicarse después de los plugins de Android y Kotlin.
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+def localProperties = new Properties()
+def localPropertiesFile = rootProject.file("local.properties")
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.withReader("UTF-8") { reader ->
+        localProperties.load(reader)
+    }
+}
+
+// Cargar las propiedades de Flutter
+def flutterVersionCode = localProperties.getProperty("flutter.versionCode")
+if (flutterVersionCode == null) {
+    flutterVersionCode = "1" // Valor predeterminado si no se encuentra en local.properties
+}
+
+def flutterVersionName = localProperties.getProperty("flutter.versionName")
+if (flutterVersionName == null) {
+    flutterVersionName = "1.0" // Valor predeterminado si no se encuentra en local.properties
+}
+
+android {
+    // 1. Añadimos el namespace (Obligatorio en plantillas nuevas)
+    namespace "com.kym.lavozdelacuradivina.radio" 
+    
+    // 2. Usamos la versión de SDK correcta (36)
+    compileSdkVersion 36
+
+    defaultConfig {
+        applicationId "com.kym.lavozdelacuradivina.radio"
+        minSdkVersion flutter.minSdkVersion
+        targetSdkVersion 36 // Usamos la versión de SDK correcta (36)
+        versionCode flutterVersionCode.toInteger() 
+        versionName flutterVersionName 
+    }
+
+    signingConfigs {
+        release {
+            // 3. Ruta corregida (../../) para que lo encuentre en Firebase Studio
+            storeFile file("/home/user/appradiovoz2026/upload-keystore.jks") 
+            storePassword "453691450"
+            keyAlias "kennycar"
+            keyPassword "453691450" 
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false 
+            shrinkResources false 
+            signingConfig signingConfigs.release 
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17 
+        targetCompatibility JavaVersion.VERSION_17 
+    }
+
+    kotlinOptions {
+        jvmTarget = "17" 
+    }
+}
+
+flutter {
+    source = "../.." // Ruta hacia el código fuente de Flutter (ajustar si es necesario)
+}
