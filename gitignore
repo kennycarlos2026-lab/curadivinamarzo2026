@@ -1,0 +1,102 @@
+# =================================================================
+# CONFIGURACIÓN PARA REPOSITORIO PRIVADO (CON LLAVES)
+# =================================================================
+
+# NOTA: Se han permitido archivos .jks y .keystore a petición. 
+# Si el repo se hace público, recuerda borrarlos del historial.
+
+# =================================================================
+# HERRAMIENTAS DE DESARROLLO (LIMPIEZA DE WORKSPACES)
+# =================================================================
+.idx/
+.idea/
+.vscode/
+.history/
+.dart_tool/
+.packages
+.flutter-plugins
+.flutter-plugins-dependencies
+flutter_tools.stamp
+.metadata
+
+# =================================================================
+# ARCHIVOS DE COMPILACIÓN Y TEMPORALES
+# =================================================================
+build/
+bin/
+obj/
+out/
+/releases/
+/debug/
+/profile/
+
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.buildlog/
+.svn/
+
+# =================================================================
+# ESPECÍFICO POR PLATAFORMA (FLUTTER)
+# =================================================================
+
+# Android
+/android/app/src/main/assets/flutter_assets/
+/android/app/src/main/jniLibs/
+/android/app/build/
+/android/build/
+/android/app/build.gradle.orig
+/android/app/google-services.json
+/android/key.properties
+/android/local.properties
+
+# iOS
+/ios/Flutter/App.framework
+/ios/Flutter/Flutter.framework
+/ios/Flutter/flutter_assets/
+/ios/Flutter/Generated.xcconfig
+/ios/Flutter/app_framework.stamp
+/ios/Flutter/engine.stamp
+/ios/Flutter/flutter_build_texture_compressor.sh
+/ios/Flutter/.generated.xcconfig.lock
+/ios/Flutter/flutter_export_environment.sh
+/ios/Podfile.lock
+/ios/Pods/
+/ios/Runner.xcworkspace
+/ios/Runner/GeneratedPluginRegistrant.h
+/ios/Runner/GeneratedPluginRegistrant.m
+/ios/Runner/Runner-Bridging-Header.h
+/ios/Runner/Runner.xcscheme
+/ios/Runner/xcshareddata/
+
+# Web
+/web/build/
+
+# Windows
+/windows/flutter/ephemeral/
+/windows/flutter/generated_plugins.cmake
+/windows/runner/Debug/
+/windows/runner/Profile/
+/windows/runner/Release/
+
+# Linux
+/linux/flutter/ephemeral/
+/linux/flutter/generated_plugins.cmake
+/linux/flutter/.last_build_id
+
+# macOS
+/macos/Flutter/ephemeral/
+/macos/Flutter/Generated.xcconfig
+/macos/Flutter/.generated.xcconfig.lock
+/macos/Flutter/ephemeral.stamp
+/macos/Pods/
+/macos/Podfile.lock
+
+# Seguridad de entorno (Tokens/Keys de API)
+.env
+.env.*
+! .env.example
