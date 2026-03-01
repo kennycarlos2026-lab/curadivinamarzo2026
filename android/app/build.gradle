@@ -1,6 +1,6 @@
 plugins {
     id "com.android.application"
-    id "kotlin-android"
+    id "org.jetbrains.kotlin.android"
     // El Flutter Gradle Plugin debe aplicarse después de los plugins de Android y Kotlin.
     id "dev.flutter.flutter-gradle-plugin"
 }
@@ -28,13 +28,12 @@ android {
     // 1. Añadimos el namespace (Obligatorio en plantillas nuevas)
     namespace "com.kym.lavozdelacuradivina.radio" 
     
-    // 2. Usamos la versión de SDK correcta (36)
-    compileSdkVersion 36
+    compileSdkVersion flutter.compileSdkVersion
 
     defaultConfig {
         applicationId "com.kym.lavozdelacuradivina.radio"
         minSdkVersion flutter.minSdkVersion
-        targetSdkVersion 36 // Usamos la versión de SDK correcta (36)
+        targetSdkVersion flutter.targetSdkVersion
         versionCode flutterVersionCode.toInteger() 
         versionName flutterVersionName 
     }
