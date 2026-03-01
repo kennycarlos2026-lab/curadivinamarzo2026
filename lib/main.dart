@@ -23,7 +23,7 @@ import 'alarm_manager.dart';
 void playRadio() async {
   final audioPlayer = AudioPlayer();
   try {
-    if (!kIsWeb) {
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
       await JustAudioBackground.init(
         androidNotificationChannelId: 'com.kym.lavozdelacuradivina.radio.channel.alarm',
         androidNotificationChannelName: 'Radio A Voz da Cura Divina - Alarma',
@@ -42,7 +42,7 @@ void playRadio() async {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await initializeDateFormatting('pt_BR', null);
-  if (!kIsWeb) {
+  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
     await AndroidAlarmManager.initialize();
   }
   try {
@@ -102,6 +102,8 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
   DateTime? _alarmTime;
   static const int alarmId = 0;
 
+  bool get _supportsAndroidAlarm => !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
   @override
   void initState() {
     super.initState();
@@ -112,7 +114,7 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
   }
 
   Future<void> _loadPreferencesAndInitialize() async {
-    if (!kIsWeb) {
+    if (_supportsAndroidAlarm) {
       final prefs = await SharedPreferences.getInstance();
       final alarmMillis = prefs.getInt('alarmTime');
       if (alarmMillis != null) {
@@ -233,7 +235,7 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
             _buildTimerOption(60, 'Desligar em 1 hora'),
             if (_sleepTimer != null)
               _buildCancelOption('Cancelar Temporizador', _cancelSleepTimer, 'Temporizador de apagado cancelado.'),
-            if (!kIsWeb) ...[
+            if (_supportsAndroidAlarm) ...[
               const Divider(),
               _buildAlarmOption('Programar Alarme', _selectAlarmTime),
               if (_alarmTime != null) _buildCancelOption('Cancelar Alarme', _cancelAlarm, 'Alarma cancelada.'),
@@ -337,7 +339,7 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
   }
 
   Future<void> _scheduleAlarm(TimeOfDay time) async {
-    if (kIsWeb) return;
+    if (!_supportsAndroidAlarm) return;
     final now = DateTime.now();
     DateTime scheduledTime = DateTime(now.year, now.month, now.day, time.hour, time.minute);
     if (scheduledTime.isBefore(now)) {
@@ -362,7 +364,7 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
   }
 
   Future<void> _cancelAlarm() async {
-    if (kIsWeb) return;
+    if (!_supportsAndroidAlarm) return;
     await AndroidAlarmManager.cancel(alarmId);
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('alarmTime');
@@ -407,7 +409,7 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
                               leading: Icon(Icons.timer_outlined, color: iconColor),
                               title: Text("Temporizador de Sono", style: TextStyle(color: textColor)),
                               onTap: _showTimerAndAlarmDialog),
-                          if (!kIsWeb)
+                          if (_supportsAndroidAlarm)
                             ListTile(
                                 leading: Icon(Icons.alarm, color: iconColor),
                                 title: Text("Alarme Despertador", style: TextStyle(color: textColor)),
@@ -548,7 +550,7 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
                                                           style: TextStyle(
                                                               color: textColor.withOpacity(0.9), fontSize: 14, fontWeight: FontWeight.bold))
                                                     ],
-                                                    if (!kIsWeb && _alarmTime != null) ...[
+                                                    if (_supportsAndroidAlarm && _alarmTime != null) ...[
                                                       const SizedBox(height: 4),
                                                       Text('Alarma: ${intl.DateFormat('HH:mm').format(_alarmTime!)}',
                                                           style: TextStyle(
