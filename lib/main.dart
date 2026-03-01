@@ -1,7 +1,8 @@
+
 import 'dart:async';
 import 'dart:isolate';
 import 'dart:ui';
-import 'package:android_alarm_manager_plus/android_alarm_manager_plus.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:just_audio/just_audio.dart';
@@ -16,16 +17,19 @@ import 'package:intl/intl.dart' as intl;
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sleek_circular_slider/sleek_circular_slider.dart';
+import 'alarm_manager.dart';
 
 @pragma('vm:entry-point')
 void playRadio() async {
   final audioPlayer = AudioPlayer();
   try {
-    await JustAudioBackground.init(
-      androidNotificationChannelId: 'com.kym.lavozdelacuradivina.radio.channel.alarm',
-      androidNotificationChannelName: 'Radio A Voz da Cura Divina - Alarma',
-      androidNotificationOngoing: true,
-    );
+    if (!kIsWeb) {
+      await JustAudioBackground.init(
+        androidNotificationChannelId: 'com.kym.lavozdelacuradivina.radio.channel.alarm',
+        androidNotificationChannelName: 'Radio A Voz da Cura Divina - Alarma',
+        androidNotificationOngoing: true,
+      );
+    }
     const String streamUrl = 'https://s10.maxcast.com.br:9083/live';
     final mediaItem = MediaItem(id: streamUrl, title: 'A Voz da Cura Divina - Alarma', artist: 'Radio ao vivo');
     await audioPlayer.setAudioSource(AudioSource.uri(Uri.parse(streamUrl), tag: mediaItem));
@@ -38,14 +42,18 @@ void playRadio() async {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await initializeDateFormatting('pt_BR', null);
-  await AndroidAlarmManager.initialize();
+  if (!kIsWeb) {
+    await AndroidAlarmManager.initialize();
+  }
   try {
-    await JustAudioBackground.init(
-      androidNotificationChannelId: 'com.kym.lavozdelacuradivina.radio.channel.audio',
-      androidNotificationChannelName: 'Radio A Voz da Cura Divina',
-      androidNotificationOngoing: true,
-      notificationColor: const Color(0xFF2196f3),
-    );
+    if (!kIsWeb) {
+      await JustAudioBackground.init(
+        androidNotificationChannelId: 'com.kym.lavozdelacuradivina.radio.channel.audio',
+        androidNotificationChannelName: 'Radio A Voz da Cura Divina',
+        androidNotificationOngoing: true,
+        notificationColor: const Color(0xFF2196f3),
+      );
+    }
     final session = await AudioSession.instance;
     await session.configure(const AudioSessionConfiguration.music());
   } catch (e) {
@@ -100,23 +108,25 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _clockStream = Stream.periodic(const Duration(seconds: 1), (_) => DateTime.now());
     _loadPreferencesAndInitialize();
+    _initializePlayer();
   }
 
   Future<void> _loadPreferencesAndInitialize() async {
-    final prefs = await SharedPreferences.getInstance();
-    final alarmMillis = prefs.getInt('alarmTime');
-    if (alarmMillis != null) {
-      _alarmTime = DateTime.fromMillisecondsSinceEpoch(alarmMillis);
-      if (_alarmTime!.isBefore(DateTime.now())) {
-        _alarmTime = null;
-        await prefs.remove('alarmTime');
+    if (!kIsWeb) {
+      final prefs = await SharedPreferences.getInstance();
+      final alarmMillis = prefs.getInt('alarmTime');
+      if (alarmMillis != null) {
+        _alarmTime = DateTime.fromMillisecondsSinceEpoch(alarmMillis);
+        if (_alarmTime!.isBefore(DateTime.now())) {
+          _alarmTime = null;
+          await prefs.remove('alarmTime');
+        }
       }
     }
     setState(() => _isInitialLoading = false);
   }
 
   Future<void> _initializePlayer() async {
-    if (mounted) setState(() => _isInitialLoading = true);
     _audioPlayer.setVolume(_volume);
     _audioPlayer.playerStateStream.listen((state) {
       if (mounted) setState(() {});
@@ -134,7 +144,9 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
     } catch (e) {
       if (mounted) setState(() => _errorMessage = 'Error de inicialización: ${e.toString()}');
     } finally {
-      if (mounted) setState(() => _isInitialLoading = false);
+      if (mounted && _isInitialLoading) {
+         setState(() => _isInitialLoading = false);
+      }
     }
   }
 
@@ -182,7 +194,7 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
     } else {
       try {
         if (_audioPlayer.processingState == ProcessingState.idle) {
-          await _initializePlayer();
+            await _initializeAudio();
         }
         if (mounted) setState(() => _isConnecting = true);
         await _audioPlayer.play();
@@ -221,9 +233,11 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
             _buildTimerOption(60, 'Desligar em 1 hora'),
             if (_sleepTimer != null)
               _buildCancelOption('Cancelar Temporizador', _cancelSleepTimer, 'Temporizador de apagado cancelado.'),
-            const Divider(),
-            _buildAlarmOption('Programar Alarme', _selectAlarmTime),
-            if (_alarmTime != null) _buildCancelOption('Cancelar Alarme', _cancelAlarm, 'Alarma cancelada.'),
+            if (!kIsWeb) ...[
+              const Divider(),
+              _buildAlarmOption('Programar Alarme', _selectAlarmTime),
+              if (_alarmTime != null) _buildCancelOption('Cancelar Alarme', _cancelAlarm, 'Alarma cancelada.'),
+            ]
           ],
         );
       },
@@ -323,6 +337,7 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
   }
 
   Future<void> _scheduleAlarm(TimeOfDay time) async {
+    if (kIsWeb) return;
     final now = DateTime.now();
     DateTime scheduledTime = DateTime(now.year, now.month, now.day, time.hour, time.minute);
     if (scheduledTime.isBefore(now)) {
@@ -347,6 +362,7 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
   }
 
   Future<void> _cancelAlarm() async {
+    if (kIsWeb) return;
     await AndroidAlarmManager.cancel(alarmId);
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('alarmTime');
@@ -391,10 +407,11 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
                               leading: Icon(Icons.timer_outlined, color: iconColor),
                               title: Text("Temporizador de Sono", style: TextStyle(color: textColor)),
                               onTap: _showTimerAndAlarmDialog),
-                          ListTile(
-                              leading: Icon(Icons.alarm, color: iconColor),
-                              title: Text("Alarme Despertador", style: TextStyle(color: textColor)),
-                              onTap: _showTimerAndAlarmDialog),
+                          if (!kIsWeb)
+                            ListTile(
+                                leading: Icon(Icons.alarm, color: iconColor),
+                                title: Text("Alarme Despertador", style: TextStyle(color: textColor)),
+                                onTap: _showTimerAndAlarmDialog),
                           const Divider(),
                           ListTile(
                               leading: Icon(Icons.language, color: iconColor),
@@ -531,7 +548,7 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
                                                           style: TextStyle(
                                                               color: textColor.withOpacity(0.9), fontSize: 14, fontWeight: FontWeight.bold))
                                                     ],
-                                                    if (_alarmTime != null) ...[
+                                                    if (!kIsWeb && _alarmTime != null) ...[
                                                       const SizedBox(height: 4),
                                                       Text('Alarma: ${intl.DateFormat('HH:mm').format(_alarmTime!)}',
                                                           style: TextStyle(
@@ -736,7 +753,6 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
                                                   GestureDetector(
                                                       onTap: () {
                                                         _scaffoldKey.currentState?.openDrawer();
-                                                        setState(() {});
                                                       },
                                                       child: Column(children: [
                                                         Container(
@@ -761,8 +777,8 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
                                                             style: TextStyle(color: textColor, fontSize: 12, fontWeight: FontWeight.bold))
                                                       ]))
                                                 ]))
-                                      ]))),
-                            ))),
+                                      ])))),
+                            )),
                       Image.asset('assets/logoipdd.webp', height: 50),
                       const SizedBox(height: 16),
                     ],
