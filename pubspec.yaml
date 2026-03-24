@@ -3,26 +3,26 @@ name: la_voz_de_la_cura_divina
 description: Una aplicación de radio para La Voz de la Cura Divina.
 version: 1.0.0+52
 environment:
-  sdk: ">=2.19.0 <3.0.0"
+  sdk: ">=3.6.0 <4.0.0"
 
 dependencies:
   flutter:
     sdk: flutter
-  just_audio: ^0.9.38
-  just_audio_background: ^0.0.1-beta.17
-  audio_session: ^0.1.18
-  provider: ^6.1.2
-  url_launcher: ^6.3.0
-  marquee: ^2.3.0
-  share_plus: ^9.0.0
-  flutter_spinkit: ^5.2.1
-  connectivity_plus: ^6.0.3
-  loading_animation_widget: ^1.2.1
-  google_fonts: ^6.2.1
-  intl: ^0.18.1
-  sleek_circular_slider: ^2.1.0
-  android_alarm_manager_plus: ^5.0.0
-  shared_preferences: ^2.5.4
+  just_audio: any
+  just_audio_background: any
+  audio_session: any
+  provider: any
+  url_launcher: any
+  marquee: any
+  share_plus: any
+  flutter_spinkit: any
+  connectivity_plus: any
+  loading_animation_widget: any
+  google_fonts: any
+  intl: any
+  sleek_circular_slider: any
+  android_alarm_manager_plus: any
+  shared_preferences: any
 
 dev_dependencies:
   flutter_test:
