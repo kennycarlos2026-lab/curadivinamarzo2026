@@ -2,11 +2,13 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:marquee/marquee.dart';
 import 'package:firebase_remote_config/firebase_remote_config.dart';
+import 'package:just_audio/just_audio.dart';
 
 class BannerAvisos extends StatefulWidget {
   final bool isPlaying;
+  final AudioPlayer audioPlayer;
 
-  const BannerAvisos({Key? key, required this.isPlaying}) : super(key: key);
+  const BannerAvisos({Key? key, required this.isPlaying, required this.audioPlayer}) : super(key: key);
 
   @override
   State<BannerAvisos> createState() => _BannerAvisosState();
@@ -19,11 +21,29 @@ class _BannerAvisosState extends State<BannerAvisos> {
   Color _colorFondo = Colors.black;
   Color _colorTexto = Colors.white;
   Color _colorVineta = Colors.green;
+  String _marqueeTextoRC = "";
+  String _streamMetadata = "";
 
   @override
   void initState() {
     super.initState();
     _fetchRemoteConfig();
+    _setupMetadataListener();
+  }
+
+  void _setupMetadataListener() {
+    widget.audioPlayer.icyMetadataStream.listen((metadata) {
+      if (metadata != null && metadata.info != null) {
+        final title = metadata.info?.title ?? '';
+        if (title.isNotEmpty) {
+          if (mounted) {
+            setState(() {
+              _streamMetadata = title;
+            });
+          }
+        }
+      }
+    });
   }
 
   Future<void> _fetchRemoteConfig() async {
@@ -36,14 +56,31 @@ class _BannerAvisosState extends State<BannerAvisos> {
       
       // Default value to prevent errors if not configured in Firebase yet
       await remoteConfig.setDefaults(const {
-        "aviso_banner_config": '{"aviso_activo": false, "mensaje": "", "fecha_inicio": "2026-01-01T00:00:00", "fecha_fin": "2026-01-02T00:00:00", "color_fondo": "#000000", "color_texto": "#FFFFFF"}'
+        "aviso_banner_config": '{"aviso_activo": false, "mensaje": "", "fecha_inicio": "2026-01-01T00:00:00", "fecha_fin": "2026-01-02T00:00:00", "color_fondo": "#000000", "color_texto": "#FFFFFF"}',
+        "marquee_texto": "",
       });
 
       await remoteConfig.fetchAndActivate();
       
+      if (mounted) {
+        setState(() {
+          _marqueeTextoRC = remoteConfig.getString("marquee_texto");
+        });
+      }
+
       final String jsonConfig = remoteConfig.getString("aviso_banner_config");
       debugPrint("RemoteConfig fetched (aviso_banner_config): $jsonConfig");
       _parseConfig(jsonConfig);
+
+      remoteConfig.onConfigUpdated.listen((event) async {
+        await remoteConfig.activate();
+        if (mounted) {
+          setState(() {
+            _marqueeTextoRC = remoteConfig.getString("marquee_texto");
+            _parseConfig(remoteConfig.getString("aviso_banner_config"));
+          });
+        }
+      });
     } catch (e) {
       debugPrint("Error fetching remote config: \$e");
     }
@@ -89,6 +126,16 @@ class _BannerAvisosState extends State<BannerAvisos> {
     return Color(colorInt ?? 0xFF000000);
   }
 
+  String get _displayMarqueeText {
+    const String defaultText = "A Voz da Cura Divina No Ar - Evangelizando o Mundo  ";
+    if (_marqueeTextoRC.toLowerCase() == "metadata") {
+      return _streamMetadata.isNotEmpty ? "$_streamMetadata  " : defaultText;
+    } else if (_marqueeTextoRC.isNotEmpty) {
+      return "$_marqueeTextoRC  ";
+    }
+    return defaultText;
+  }
+
   @override
   Widget build(BuildContext context) {
     // Si no hay aviso activo (fuera de fecha o desactivado), mostramos el diseño normal sin posibilidad de expandir
@@ -103,7 +150,7 @@ class _BannerAvisosState extends State<BannerAvisos> {
             Expanded(
               child: widget.isPlaying
                   ? Marquee(
-                      text: "A Voz da Cura Divina No Ar - Evangelizando o Mundo  ",
+                      text: _displayMarqueeText,
                       style: const TextStyle(color: Colors.white, fontSize: 16),
                       velocity: 40.0,
                       blankSpace: 50.0,
@@ -139,7 +186,7 @@ class _BannerAvisosState extends State<BannerAvisos> {
                 Expanded(
                   child: widget.isPlaying
                       ? Marquee(
-                          text: "A Voz da Cura Divina No Ar - Evangelizando o Mundo  ",
+                          text: _displayMarqueeText,
                           style: TextStyle(color: _isExpanded ? _colorTexto : Colors.white, fontSize: 16),
                           velocity: 40.0,
                           blankSpace: 50.0,

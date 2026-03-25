@@ -483,15 +483,6 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
                               ),
                             ),
                           ),
-                          ListTile(
-                              leading: Icon(Icons.timer_outlined, color: iconColor),
-                              title: Text("Temporizador de Sono", style: TextStyle(color: textColor)),
-                              onTap: _showTimerAndAlarmDialog),
-                          if (_supportsAndroidAlarm)
-                            ListTile(
-                                leading: Icon(Icons.alarm, color: iconColor),
-                                title: Text("Alarme Despertador", style: TextStyle(color: textColor)),
-                                onTap: _showTimerAndAlarmDialog),
                           const Divider(),
                           ListTile(
                               leading: Icon(Icons.language, color: iconColor),
@@ -511,6 +502,11 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
                               title: Text("Ajude esta obra", style: TextStyle(color: textColor)),
                               onTap: () =>
                                   _launchURL("https://www.igrejaprimitivadoutrinadivina.com/internas/contas-bancarias")),
+                          const Divider(),
+                          ListTile(
+                              leading: Icon(Icons.alarm_add, color: iconColor),
+                              title: Text("Temporizador e Alarme", style: TextStyle(color: textColor)),
+                              onTap: _showTimerAndAlarmDialog),
                           ListTile(
                               leading: Icon(Icons.share, color: iconColor),
                               title: Text("Compartilhar", style: TextStyle(color: textColor)),
@@ -590,7 +586,7 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
                   Row(
                     children: [
                       Expanded(
-                        child: BannerAvisos(isPlaying: _audioPlayer.playerState.playing),
+                        child: BannerAvisos(isPlaying: _audioPlayer.playerState.playing, audioPlayer: _audioPlayer),
                       ),
                       const SizedBox(width: 8),
                       _CustomSwitch(
