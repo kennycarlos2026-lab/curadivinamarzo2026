@@ -100,3 +100,6 @@ out/
 .env
 .env.*
 ! .env.example
+
+# Android Gradle
+android/.gradle/
