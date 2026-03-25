@@ -17,7 +17,12 @@ import 'package:intl/intl.dart' as intl;
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sleek_circular_slider/sleek_circular_slider.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'firebase_options.dart';
+import 'banner_avisos.dart';
+import 'versiculos_promesas.dart';
 import 'alarm_manager.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 
 @pragma('vm:entry-point')
 void playRadio() async {
@@ -39,8 +44,53 @@ void playRadio() async {
   }
 }
 
+@pragma('vm:entry-point')
+Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  debugPrint("Handling a background message: ${message.messageId}");
+}
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
+
+  // Background message handler
+  FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+
+  // Request permissions for notifications
+  FirebaseMessaging messaging = FirebaseMessaging.instance;
+  NotificationSettings settings = await messaging.requestPermission(
+    alert: true,
+    badge: true,
+    sound: true,
+  );
+
+  if (settings.authorizationStatus == AuthorizationStatus.authorized) {
+    debugPrint('User granted permission');
+  } else if (settings.authorizationStatus == AuthorizationStatus.provisional) {
+    debugPrint('User granted provisional permission');
+  } else {
+    debugPrint('User declined or has not accepted permission');
+  }
+
+  // Handle foreground messages
+  FirebaseMessaging.onMessage.listen((RemoteMessage message) {
+    debugPrint('Got a message whilst in the foreground!');
+    if (message.notification != null) {
+      debugPrint('Message also contained a notification: ${message.notification!.title}');
+    }
+  });
+
+  // Get and print FCM Token
+  try {
+    String? token = await messaging.getToken();
+    debugPrint("FCM Token: $token");
+  } catch (e) {
+    debugPrint("Error getting FCM token: $e");
+  }
+
   await initializeDateFormatting('pt_BR', null);
   if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
     await AndroidAlarmManager.initialize();
@@ -405,6 +455,34 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
                                 padding: const EdgeInsets.all(20.0),
                                 child: Image.asset('assets/logoipdd.webp', fit: BoxFit.contain),
                               )),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+                            child: Container(
+                              padding: const EdgeInsets.all(12.0),
+                              decoration: BoxDecoration(
+                                color: _isDarkMode ? Colors.white10 : Colors.black.withOpacity(0.05),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(color: Colors.blue.withOpacity(0.3)),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    children: [
+                                      Icon(Icons.menu_book, size: 16, color: Colors.blue.shade700),
+                                      const SizedBox(width: 8),
+                                      Text("Versículo Diário", style: TextStyle(color: textColor, fontWeight: FontWeight.bold, fontSize: 12)),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    obtenerVersiculoDelDia(),
+                                    style: TextStyle(color: textColor.withOpacity(0.9), fontSize: 13, fontStyle: FontStyle.italic),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
                           ListTile(
                               leading: Icon(Icons.timer_outlined, color: iconColor),
                               title: Text("Temporizador de Sono", style: TextStyle(color: textColor)),
@@ -512,25 +590,7 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
                   Row(
                     children: [
                       Expanded(
-                        child: Container(
-                            height: 30,
-                            padding: const EdgeInsets.symmetric(horizontal: 12),
-                            decoration: BoxDecoration(color: Colors.black, borderRadius: BorderRadius.circular(15.0)),
-                            child: Row(children: [
-                              if (_audioPlayer.playerState.playing) const _BlinkingLiveIndicator(),
-                              Expanded(
-                                child: _audioPlayer.playerState.playing
-                                    ? Marquee(
-                                        text: "A Voz da Cura Divina No Ar - Evangelizando o Mundo  ",
-                                        style: const TextStyle(color: Colors.white, fontSize: 16),
-                                        velocity: 40.0,
-                                        blankSpace: 50.0,
-                                        crossAxisAlignment: CrossAxisAlignment.center)
-                                    : Center(
-                                        child: Text("OFFLINE",
-                                            style: TextStyle(color: Colors.white.withOpacity(0.7), fontSize: 16, fontWeight: FontWeight.bold))),
-                              ),
-                            ])),
+                        child: BannerAvisos(isPlaying: _audioPlayer.playerState.playing),
                       ),
                       const SizedBox(width: 8),
                       _CustomSwitch(

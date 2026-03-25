@@ -1,5 +1,8 @@
 plugins {
     id "com.android.application"
+    // START: FlutterFire Configuration
+    id 'com.google.gms.google-services'
+    // END: FlutterFire Configuration
     id "org.jetbrains.kotlin.android"
     // El Flutter Gradle Plugin debe aplicarse después de los plugins de Android y Kotlin.
     id "dev.flutter.flutter-gradle-plugin"
@@ -32,7 +35,7 @@ android {
 
     defaultConfig {
         applicationId "com.kym.lavozdelacuradivina.radio"
-        minSdkVersion flutter.minSdkVersion
+        minSdkVersion 23
         targetSdkVersion flutter.targetSdkVersion
         versionCode flutterVersionCode.toInteger() 
         versionName flutterVersionName 
