@@ -18,6 +18,7 @@ class _BannerAvisosState extends State<BannerAvisos> {
   String _mensaje = "";
   Color _colorFondo = Colors.black;
   Color _colorTexto = Colors.white;
+  Color _colorVineta = Colors.green;
 
   @override
   void initState() {
@@ -66,7 +67,8 @@ class _BannerAvisosState extends State<BannerAvisos> {
           _avisoActivo = true;
           _mensaje = data['texto'] ?? data['mensaje'] ?? "Aviso importante";
           _colorFondo = _hexToColor(data['color'] ?? data['color_fondo'] ?? "#000000");
-          _colorTexto = _hexToColor(data['color_texto'] ?? "#FFFFFF");
+          _colorTexto = _hexToColor(data['color_letra'] ?? data['color_texto'] ?? "#FFFFFF");
+          _colorVineta = _hexToColor(data['color_vineta'] ?? data['color_bolita'] ?? "#4CAF50"); // Verde por defecto
           _isExpanded = true; // Empieza extendido si hay aviso válido
         });
       } else {
@@ -174,7 +176,7 @@ class _BannerAvisosState extends State<BannerAvisos> {
                     width: 10,
                     height: 10,
                     margin: const EdgeInsets.only(right: 8),
-                    decoration: const BoxDecoration(color: Colors.green, shape: BoxShape.circle),
+                    decoration: BoxDecoration(color: _colorVineta, shape: BoxShape.circle),
                   ),
                   Expanded(
                     child: SingleChildScrollView(
