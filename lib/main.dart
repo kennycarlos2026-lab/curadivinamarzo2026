@@ -1,5 +1,6 @@
 
 import 'dart:async';
+import 'dart:isolate';
 import 'dart:ui';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -7,7 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:marquee/marquee.dart';
+
 import 'package:just_audio_background/just_audio_background.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
@@ -23,9 +24,22 @@ import 'banner_avisos.dart';
 import 'versiculos_promesas.dart';
 import 'alarm_manager.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:timezone/data/latest_all.dart' as tz;
+import 'package:timezone/timezone.dart' as tz;
+
+final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+final StreamController<String?> selectNotificationStream = StreamController<String?>.broadcast();
+final ReceivePort alarmReceivePort = ReceivePort();
 
 @pragma('vm:entry-point')
 void playRadio() async {
+  final SendPort? sendPort = IsolateNameServer.lookupPortByName('alarm_port');
+  if (sendPort != null) {
+    sendPort.send('play');
+    return;
+  }
+
   final audioPlayer = AudioPlayer();
   try {
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
@@ -52,6 +66,7 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  IsolateNameServer.registerPortWithName(alarmReceivePort.sendPort, 'alarm_port');
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
@@ -92,6 +107,24 @@ void main() async {
   }
 
   await initializeDateFormatting('pt_BR', null);
+  
+  tz.initializeTimeZones();
+  const AndroidInitializationSettings initializationSettingsAndroid = AndroidInitializationSettings('@mipmap/ic_launcher');
+  const InitializationSettings initializationSettings = InitializationSettings(android: initializationSettingsAndroid);
+  await flutterLocalNotificationsPlugin.initialize(
+    initializationSettings,
+    onDidReceiveNotificationResponse: (NotificationResponse response) async {
+       selectNotificationStream.add(response.payload);
+    },
+  );
+
+  bool autoPlay = false;
+  final NotificationAppLaunchDetails? notificationAppLaunchDetails = 
+      await flutterLocalNotificationsPlugin.getNotificationAppLaunchDetails();
+  if (notificationAppLaunchDetails?.didNotificationLaunchApp ?? false) {
+    autoPlay = true;
+  }
+
   if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
     await AndroidAlarmManager.initialize();
   }
@@ -109,11 +142,12 @@ void main() async {
   } catch (e) {
     debugPrint('Error inicializando plugins de audio: $e');
   }
-  runApp(const MyApp());
+  runApp(MyApp(autoPlay: autoPlay));
 }
 
 class MyApp extends StatelessWidget {
-  const MyApp({Key? key}) : super(key: key);
+  final bool autoPlay;
+  const MyApp({Key? key, this.autoPlay = false}) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
@@ -122,13 +156,14 @@ class MyApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(brightness: Brightness.light),
       darkTheme: ThemeData(brightness: Brightness.dark),
-      home: const RadioHome(),
+      home: RadioHome(autoPlay: autoPlay),
     );
   }
 }
 
 class RadioHome extends StatefulWidget {
-  const RadioHome({Key? key}) : super(key: key);
+  final bool autoPlay;
+  const RadioHome({Key? key, this.autoPlay = false}) : super(key: key);
   static const String streamUrl = 'https://s10.maxcast.com.br:9083/live';
 
   @override
@@ -160,7 +195,31 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _clockStream = Stream.periodic(const Duration(seconds: 1), (_) => DateTime.now()).asBroadcastStream();
     _loadPreferencesAndInitialize();
-    _initializePlayer();
+    
+    alarmReceivePort.listen((message) async {
+       if (message == 'play') {
+          _cancelAlarm();
+          if (!_audioPlayer.playerState.playing) {
+             await _playOrStopStream();
+          }
+       }
+    });
+
+    _initializePlayer().then((_) {
+       if (widget.autoPlay) {
+          _cancelAlarm();
+          if (!_audioPlayer.playerState.playing) {
+             _playOrStopStream();
+          }
+       }
+    });
+
+    selectNotificationStream.stream.listen((String? payload) async {
+       _cancelAlarm();
+       if (!_audioPlayer.playerState.playing) {
+           await _playOrStopStream();
+       }
+    });
   }
 
   Future<void> _loadPreferencesAndInitialize() async {
@@ -283,6 +342,7 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
             _buildTimerOption(15, 'Desligar em 15 minutos'),
             _buildTimerOption(30, 'Desligar em 30 minutos'),
             _buildTimerOption(60, 'Desligar em 1 hora'),
+            _buildCustomTimerOption(),
             if (_sleepTimer != null)
               _buildCancelOption('Cancelar Temporizador', _cancelSleepTimer, 'Temporizador de apagado cancelado.'),
             if (_supportsAndroidAlarm) ...[
@@ -294,6 +354,44 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
         );
       },
     );
+  }
+
+  Widget _buildCustomTimerOption() {
+    final textColor = _isDarkMode ? Colors.white70 : Colors.black;
+    return SimpleDialogOption(
+      onPressed: () {
+        Navigator.pop(context);
+        _selectCustomTimer();
+      },
+      child: Text('Tempo Personalizado...', style: TextStyle(color: textColor, fontWeight: FontWeight.bold)),
+    );
+  }
+
+  Future<void> _selectCustomTimer() async {
+    final TimeOfDay? picked = await showTimePicker(
+        context: context,
+        initialTime: const TimeOfDay(hour: 0, minute: 0),
+        helpText: 'ESCOLHA A DURAÇÃO (Horas e Minutos)',
+        builder: (context, child) {
+          return Theme(
+            data: _isDarkMode
+                ? ThemeData.dark().copyWith(
+                    colorScheme: const ColorScheme.dark(
+                      primary: Colors.blue,
+                      onPrimary: Colors.white,
+                      surface: const Color(0xFF0A192F),
+                      onSurface: Colors.white,
+                    ),
+                  )
+                : ThemeData.light(),
+            child: child!,
+          );
+        });
+    if (picked != null) {
+      if (picked.hour == 0 && picked.minute == 0) return;
+      final duration = Duration(hours: picked.hour, minutes: picked.minute);
+      _setSleepTimer(duration);
+    }
   }
 
   Widget _buildTimerOption(int minutes, String label) {
@@ -395,6 +493,28 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
     if (scheduledTime.isBefore(now)) {
       scheduledTime = scheduledTime.add(const Duration(days: 1));
     }
+    
+    await flutterLocalNotificationsPlugin.zonedSchedule(
+      alarmId,
+      'A Voz da Cura Divina',
+      '¡Alarme! Toque para ouvir a rádio',
+      tz.TZDateTime.from(scheduledTime, tz.local),
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'alarm_channel',
+          'Alarme Despertador',
+          channelDescription: 'Canal para o alarme da rádio',
+          importance: Importance.max,
+          priority: Priority.max,
+          fullScreenIntent: true,
+          playSound: true,
+          enableVibration: true,
+        ),
+      ),
+      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+      payload: 'alarm',
+    );
+
     await AndroidAlarmManager.oneShotAt(
       scheduledTime,
       alarmId,
@@ -409,12 +529,13 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
     if (mounted) {
       setState(() => _alarmTime = scheduledTime);
       ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Alarma programada para las ${intl.DateFormat('HH:mm').format(scheduledTime)}')));
+          .showSnackBar(SnackBar(content: Text('Alarme programado para as ${intl.DateFormat('HH:mm').format(scheduledTime)}')));
     }
   }
 
   Future<void> _cancelAlarm() async {
     if (!_supportsAndroidAlarm) return;
+    await flutterLocalNotificationsPlugin.cancel(alarmId);
     await AndroidAlarmManager.cancel(alarmId);
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('alarmTime');

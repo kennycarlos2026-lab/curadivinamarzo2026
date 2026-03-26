@@ -27,6 +27,12 @@ if (flutterVersionName == null) {
     flutterVersionName = "1.0" // Valor predeterminado si no se encuentra en local.properties
 }
 
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file('key.properties')
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
 android {
     // 1. Añadimos el namespace (Obligatorio en plantillas nuevas)
     namespace "com.kym.lavozdelacuradivina.radio" 
@@ -43,11 +49,19 @@ android {
 
     signingConfigs {
         release {
-            // 3. Ruta corregida (../../) para que lo encuentre en Firebase Studio
-            storeFile file("/home/user/appradiovoz2026/upload-keystore.jks") 
-            storePassword "453691450"
-            keyAlias "kennycar"
-            keyPassword "453691450" 
+            if (keystorePropertiesFile.exists()) {
+                keyAlias = keystoreProperties['keyAlias']
+                keyPassword = keystoreProperties['keyPassword']
+                storeFile = keystoreProperties['storeFile'] ? file(keystoreProperties['storeFile']) : null
+                storePassword = keystoreProperties['storePassword']
+            } else {
+                // Configuración original (Ruta de Linux) - ¡Fallará en Windows!
+                // Crea un archivo android/key.properties para usar rutas relativas seguras.
+                storeFile file("/home/user/appradiovoz2026/upload-keystore.jks") 
+                storePassword "453691450"
+                keyAlias "kennycar"
+                keyPassword "453691450" 
+            }
         }
     }
 
@@ -60,6 +74,7 @@ android {
     }
 
     compileOptions {
+        coreLibraryDesugaringEnabled true
         sourceCompatibility JavaVersion.VERSION_17 
         targetCompatibility JavaVersion.VERSION_17 
     }
@@ -71,4 +86,8 @@ android {
 
 flutter {
     source = "../.." // Ruta hacia el código fuente de Flutter (ajustar si es necesario)
+}
+
+dependencies {
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.5'
 }
