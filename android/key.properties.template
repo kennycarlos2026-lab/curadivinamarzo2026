@@ -1,0 +1,6 @@
+# Template for android/key.properties
+# Replace with your actual keystore details on your Windows machine.
+storePassword=453691450
+keyPassword=453691450
+keyAlias=kennycar
+storeFile=C:/Users/asusipdd/Documents/upload-keystore.jks

@@ -368,29 +368,81 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
   }
 
   Future<void> _selectCustomTimer() async {
-    final TimeOfDay? picked = await showTimePicker(
-        context: context,
-        initialTime: const TimeOfDay(hour: 0, minute: 0),
-        helpText: 'ESCOLHA A DURAÇÃO (Horas e Minutos)',
-        builder: (context, child) {
-          return Theme(
-            data: _isDarkMode
-                ? ThemeData.dark().copyWith(
-                    colorScheme: const ColorScheme.dark(
-                      primary: Colors.blue,
-                      onPrimary: Colors.white,
-                      surface: const Color(0xFF0A192F),
-                      onSurface: Colors.white,
+    final TextEditingController hoursController = TextEditingController(text: '0');
+    final TextEditingController minutesController = TextEditingController(text: '0');
+
+    final bool? result = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) {
+        final textColor = _isDarkMode ? Colors.white : Colors.black;
+        final bgColor = _isDarkMode ? const Color(0xFF0A192F) : Colors.white;
+        return AlertDialog(
+          backgroundColor: bgColor,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: Text('Tempo Personalizado', style: TextStyle(color: textColor, fontWeight: FontWeight.bold)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('Digite a duração exata para desligar a rádio:', style: TextStyle(color: textColor.withOpacity(0.8), fontSize: 14)),
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: hoursController,
+                      keyboardType: TextInputType.number,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: textColor, fontSize: 24, fontWeight: FontWeight.bold),
+                      decoration: InputDecoration(
+                        labelText: 'Horas',
+                        labelStyle: TextStyle(color: textColor.withOpacity(0.6), fontSize: 14),
+                        enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: textColor.withOpacity(0.2)), borderRadius: BorderRadius.circular(10)),
+                        focusedBorder: OutlineInputBorder(borderSide: const BorderSide(color: Colors.blue, width: 2), borderRadius: BorderRadius.circular(10)),
+                      ),
                     ),
-                  )
-                : ThemeData.light(),
-            child: child!,
-          );
-        });
-    if (picked != null) {
-      if (picked.hour == 0 && picked.minute == 0) return;
-      final duration = Duration(hours: picked.hour, minutes: picked.minute);
-      _setSleepTimer(duration);
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                    child: Text(':', style: TextStyle(color: textColor, fontSize: 24, fontWeight: FontWeight.bold)),
+                  ),
+                  Expanded(
+                    child: TextField(
+                      controller: minutesController,
+                      keyboardType: TextInputType.number,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: textColor, fontSize: 24, fontWeight: FontWeight.bold),
+                      decoration: InputDecoration(
+                        labelText: 'Minutos',
+                        labelStyle: TextStyle(color: textColor.withOpacity(0.6), fontSize: 14),
+                        enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: textColor.withOpacity(0.2)), borderRadius: BorderRadius.circular(10)),
+                        focusedBorder: OutlineInputBorder(borderSide: const BorderSide(color: Colors.blue, width: 2), borderRadius: BorderRadius.circular(10)),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: Text('Cancelar', style: TextStyle(color: textColor.withOpacity(0.6))),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, true),
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.blue.shade700, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
+              child: const Text('OK', style: TextStyle(color: Colors.white)),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (result == true) {
+      final int hours = int.tryParse(hoursController.text) ?? 0;
+      final int minutes = int.tryParse(minutesController.text) ?? 0;
+      if (hours == 0 && minutes == 0) return;
+      _setSleepTimer(Duration(hours: hours, minutes: minutes));
     }
   }
 
@@ -1070,6 +1122,7 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
 
     return Scaffold(
       key: _scaffoldKey,
+      resizeToAvoidBottomInset: false,
       drawer: MediaQuery.of(context).orientation == Orientation.landscape ? null : _buildDrawer(context),
       backgroundColor: Colors.transparent,
       body: Stack(
