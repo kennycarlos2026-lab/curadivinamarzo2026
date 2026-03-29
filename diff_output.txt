@@ -1,0 +1,70 @@
+﻿diff --git a/lib/main.dart b/lib/main.dart
+index 181f56c..9ef521c 100644
+--- a/lib/main.dart
++++ b/lib/main.dart
+@@ -31,6 +31,7 @@ import 'package:timezone/timezone.dart' as tz;
+ final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+ final StreamController<String?> selectNotificationStream = StreamController<String?>.broadcast();
+ final ReceivePort alarmReceivePort = ReceivePort();
++late final AudioPlayer mainAudioPlayer;
+ 
+ @pragma('vm:entry-point')
+ void playRadio() async {
+@@ -142,6 +143,22 @@ void main() async {
+   } catch (e) {
+     debugPrint('Error inicializando plugins de audio: $e');
+   }
++  mainAudioPlayer = AudioPlayer(
++    audioLoadConfiguration: AudioLoadConfiguration(
++      androidLoadControl: AndroidLoadControl(
++        minBufferDuration: Duration(seconds: 2),
++        maxBufferDuration: Duration(seconds: 4),
++        bufferForPlaybackDuration: Duration(seconds: 2),
++        bufferForPlaybackAfterRebufferDuration: Duration(seconds: 2),
++      ),
++    ),
++  );
++  mainAudioPlayer.setAudioSource(AudioSource.uri(
++    Uri.parse(RadioHome.streamUrl),
++    tag: MediaItem(id: RadioHome.streamUrl, title: 'A Voz da Cura Divina', artist: 'Radio ao vivo'),
++  )).then((_) => mainAudioPlayer.play()).catchError((e) {
++    debugPrint('Error starting stream: $e');
++  });
+   runApp(MyApp(autoPlay: autoPlay));
+ }
+ 
+@@ -172,7 +189,7 @@ class RadioHome extends StatefulWidget {
+ 
+ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
+   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+-  final AudioPlayer _audioPlayer = AudioPlayer();
++  final AudioPlayer _audioPlayer = mainAudioPlayer;
+   bool _isDarkMode = false;
+   bool _isInitialLoading = true;
+   String _errorMessage = '';
+@@ -206,11 +223,9 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
+     });
+ 
+     _initializePlayer().then((_) {
+-       if (widget.autoPlay) {
+-          _cancelAlarm();
+-          if (!_audioPlayer.playerState.playing) {
+-             _playOrStopStream();
+-          }
++       if (widget.autoPlay) _cancelAlarm();
++       if (!_audioPlayer.playerState.playing) {
++          _playOrStopStream();
+        }
+     });
+ 
+@@ -251,7 +266,9 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
+       if (state == ProcessingState.completed) _restartStream();
+     });
+     try {
+-      await _initializeAudio();
++      if (_audioPlayer.processingState == ProcessingState.idle) {
++        await _initializeAudio();
++      }
+     } catch (e) {
+       if (mounted) setState(() => _errorMessage = 'Error de inicializaci├│n: ${e.toString()}');
+     } finally {

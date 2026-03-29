@@ -47,10 +47,16 @@ void playRadio() async {
         androidNotificationChannelId: 'com.kym.lavozdelacuradivina.radio.channel.alarm',
         androidNotificationChannelName: 'Radio A Voz da Cura Divina - Alarma',
         androidNotificationOngoing: true,
+        androidNotificationIcon: 'drawable/ic_notification',
       );
     }
     const String streamUrl = 'https://s10.maxcast.com.br:9083/live';
-    final mediaItem = MediaItem(id: streamUrl, title: 'A Voz da Cura Divina - Alarma', artist: 'Radio ao vivo');
+    final mediaItem = MediaItem(
+      id: streamUrl,
+      title: 'A Voz da Cura Divina - Alarma',
+      artist: 'Radio ao vivo',
+      artUri: Uri.parse('https://i.ibb.co/XZKxHq3x/LOGOFONDOBARAPPok.jpg'),
+    );
     await audioPlayer.setAudioSource(AudioSource.uri(Uri.parse(streamUrl), tag: mediaItem));
     await audioPlayer.play();
   } catch (e) {
@@ -109,7 +115,7 @@ void main() async {
   await initializeDateFormatting('pt_BR', null);
   
   tz.initializeTimeZones();
-  const AndroidInitializationSettings initializationSettingsAndroid = AndroidInitializationSettings('@mipmap/ic_launcher');
+  const AndroidInitializationSettings initializationSettingsAndroid = AndroidInitializationSettings('ic_notification');
   const InitializationSettings initializationSettings = InitializationSettings(android: initializationSettingsAndroid);
   await flutterLocalNotificationsPlugin.initialize(
     initializationSettings,
@@ -134,7 +140,8 @@ void main() async {
         androidNotificationChannelId: 'com.kym.lavozdelacuradivina.radio.channel.audio',
         androidNotificationChannelName: 'Radio A Voz da Cura Divina',
         androidNotificationOngoing: true,
-        notificationColor: const Color(0xFF2196f3),
+        notificationColor: const Color(0xFF80DEEA),
+        androidNotificationIcon: 'drawable/ic_notification',
       );
     }
     final session = await AudioSession.instance;
@@ -206,11 +213,9 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
     });
 
     _initializePlayer().then((_) {
-       if (widget.autoPlay) {
-          _cancelAlarm();
-          if (!_audioPlayer.playerState.playing) {
-             _playOrStopStream();
-          }
+       if (widget.autoPlay) _cancelAlarm();
+       if (!_audioPlayer.playerState.playing) {
+          _playOrStopStream();
        }
     });
 
@@ -241,10 +246,19 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
     _audioPlayer.setVolume(_volume);
     _audioPlayer.playerStateStream.listen((state) {
       if (mounted) setState(() {});
-      if (state.playing &&
-          _isConnecting &&
-          (state.processingState == ProcessingState.ready || state.processingState == ProcessingState.buffering)) {
-        if (mounted) setState(() => _isConnecting = false);
+      if (state.playing && _errorMessage.isNotEmpty) {
+        if (mounted) setState(() => _errorMessage = '');
+      }
+      // 1. Control determinista del Spinner basado en el estado interno
+      if (state.playing && (state.processingState == ProcessingState.loading || state.processingState == ProcessingState.buffering)) {
+        if (!_isConnecting && mounted) setState(() => _isConnecting = true);
+      } else {
+        if (_isConnecting && mounted) setState(() => _isConnecting = false);
+      }
+      
+      // Intercept Pause -> stop() limpio. Cierra conexión y notificación.
+      if (!state.playing && state.processingState != ProcessingState.idle && state.processingState != ProcessingState.completed) {
+        _audioPlayer.stop(); 
       }
     });
     _audioPlayer.processingStateStream.listen((state) {
@@ -275,10 +289,19 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
     if (!mounted) return;
     setState(() => _errorMessage = '');
     try {
-      final mediaItem = MediaItem(id: RadioHome.streamUrl, title: 'A Voz da Cura Divina', artist: 'Radio ao vivo');
+      final mediaItem = MediaItem(
+        id: RadioHome.streamUrl,
+        title: 'A Voz da Cura Divina',
+        artist: 'Radio ao vivo',
+        artUri: Uri.parse('https://i.ibb.co/XZKxHq3x/LOGOFONDOBARAPPok.jpg'),
+      );
       await _audioPlayer.setAudioSource(AudioSource.uri(Uri.parse(RadioHome.streamUrl), tag: mediaItem), preload: false);
     } catch (e) {
-      if (mounted) setState(() => _errorMessage = 'Error de fuente de audio: ${e.toString()}');
+      final errorStr = e.toString();
+      // Si el usuario toca botones rápido, aborta la carga vieja. Ignoramos ese error visualmente.
+      if (errorStr.contains('interrupted') || errorStr.contains('aborted') || errorStr.contains('cancelled')) return;
+      
+      if (mounted) setState(() => _errorMessage = 'Error de fuente de audio: $errorStr');
     }
   }
 
@@ -301,19 +324,16 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
     setState(() => _errorMessage = '');
     if (_audioPlayer.playerState.playing) {
       await _audioPlayer.stop();
-      if (mounted) setState(() => _isConnecting = false);
     } else {
       try {
         if (_audioPlayer.processingState == ProcessingState.idle) {
             await _initializeAudio();
         }
-        if (mounted) setState(() => _isConnecting = true);
         await _audioPlayer.play();
       } catch (e) {
         if (mounted) {
           setState(() {
             _errorMessage = 'Error al intentar reproducir.';
-            _isConnecting = false;
           });
         }
       }
@@ -1108,7 +1128,7 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
 
     if (_isInitialLoading)
       return Scaffold(backgroundColor: baseBgColor, body: Center(child: LoadingAnimationWidget.inkDrop(color: textColor, size: 50.0)));
-    if (_errorMessage.isNotEmpty)
+    if (_errorMessage.isNotEmpty && !_audioPlayer.playerState.playing)
       return Scaffold(
           backgroundColor: baseBgColor,
           body: Center(
