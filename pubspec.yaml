@@ -1,4 +1,3 @@
-
 name: la_voz_de_la_cura_divina
 description: Una aplicación de radio para La Voz de la Cura Divina.
 version: 1.0.0+58
@@ -28,6 +27,7 @@ dependencies:
   firebase_messaging: ^16.1.3
   flutter_local_notifications: ^19.5.0
   timezone: ^0.10.1
+  flutter_inappwebview: ^6.1.5
 
 dev_dependencies:
   flutter_test:
