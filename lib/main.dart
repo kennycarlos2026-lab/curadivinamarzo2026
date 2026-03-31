@@ -206,6 +206,8 @@ class _RadioHomeState extends State<RadioHome>
   DateTime? _alarmTime;
   static const int alarmId = 0;
   static const String chavePix = "TU_CLAVE_AQUI";
+  bool _isNavigating = false;
+  List<int> _alarmDays = [];
 
   // Web View State
   bool _isWebMode = false;
@@ -257,8 +259,9 @@ class _RadioHomeState extends State<RadioHome>
   }
 
   Future<void> _loadPreferencesAndInitialize() async {
+    final prefs = await SharedPreferences.getInstance();
+    _isDarkMode = prefs.getBool('isDarkMode') ?? false;
     if (_supportsAndroidAlarm) {
-      final prefs = await SharedPreferences.getInstance();
       final alarmMillis = prefs.getInt('alarmTime');
       if (alarmMillis != null) {
         _alarmTime = DateTime.fromMillisecondsSinceEpoch(alarmMillis);
@@ -266,6 +269,10 @@ class _RadioHomeState extends State<RadioHome>
           _alarmTime = null;
           await prefs.remove('alarmTime');
         }
+      }
+      final savedDays = prefs.getStringList('alarmDays');
+      if (savedDays != null) {
+        _alarmDays = savedDays.map((e) => int.parse(e)).toList();
       }
     }
     setState(() => _isInitialLoading = false);
@@ -674,24 +681,176 @@ class _RadioHomeState extends State<RadioHome>
             child: child!,
           );
         });
-    if (picked != null) {
-      _scheduleAlarm(picked);
-    }
+    if (picked == null) return;
+    final days = await _showDaySelector(_alarmDays);
+    if (days == null) return;
+    _alarmDays = days;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(
+        'alarmDays', _alarmDays.map((e) => e.toString()).toList());
+    _scheduleAlarm(picked);
+  }
+
+  Future<List<int>?> _showDaySelector(List<int> initialDays) async {
+    List<int> selectedDays = List.from(initialDays);
+    final locale =
+        WidgetsBinding.instance.platformDispatcher.locale.languageCode;
+    final dayLabels = locale == 'pt'
+        ? ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom']
+        : locale == 'es'
+            ? ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom']
+            : ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    return showDialog<List<int>>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            final bgColor =
+                _isDarkMode ? const Color(0xFF0A192F) : Colors.white;
+            final txtColor = _isDarkMode ? Colors.white : Colors.black;
+            return AlertDialog(
+              backgroundColor: bgColor,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(20)),
+              title: Text('Dias da semana',
+                  style: TextStyle(
+                      color: txtColor, fontWeight: FontWeight.bold)),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('Selecione os dias para o alarme:',
+                      style: TextStyle(
+                          color: txtColor.withOpacity(0.7), fontSize: 14)),
+                  const SizedBox(height: 16),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: List.generate(7, (i) {
+                      final day = i + 1;
+                      final isSelected = selectedDays.contains(day);
+                      return GestureDetector(
+                        onTap: () => setDialogState(() {
+                          isSelected
+                              ? selectedDays.remove(day)
+                              : selectedDays.add(day);
+                        }),
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 200),
+                          width: 42,
+                          height: 42,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: isSelected
+                                ? Colors.blue.shade700
+                                : Colors.transparent,
+                            border: Border.all(
+                              color: isSelected
+                                  ? Colors.blue.shade700
+                                  : txtColor.withOpacity(0.3),
+                              width: 1.5,
+                            ),
+                          ),
+                          alignment: Alignment.center,
+                          child: Text(dayLabels[i],
+                              style: TextStyle(
+                                color: isSelected
+                                    ? Colors.white
+                                    : txtColor.withOpacity(0.7),
+                                fontSize: 12,
+                                fontWeight: isSelected
+                                    ? FontWeight.bold
+                                    : FontWeight.normal,
+                              )),
+                        ),
+                      );
+                    }),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    selectedDays.isEmpty
+                        ? 'Alarme único (próxima ocorrência)'
+                        : 'Repetir semanalmente',
+                    style: TextStyle(
+                        color: txtColor.withOpacity(0.5),
+                        fontSize: 12,
+                        fontStyle: FontStyle.italic),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context, null),
+                  child: Text('Cancelar',
+                      style: TextStyle(color: txtColor.withOpacity(0.6))),
+                ),
+                ElevatedButton(
+                  onPressed: () => Navigator.pop(context, selectedDays),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blue.shade700,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10)),
+                  ),
+                  child:
+                      const Text('OK', style: TextStyle(color: Colors.white)),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
   }
 
   Future<void> _scheduleAlarm(TimeOfDay time) async {
     if (!_supportsAndroidAlarm) return;
+    await _cancelAlarmInternal();
     final now = DateTime.now();
-    DateTime scheduledTime =
-        DateTime(now.year, now.month, now.day, time.hour, time.minute);
-    if (scheduledTime.isBefore(now)) {
-      scheduledTime = scheduledTime.add(const Duration(days: 1));
+    if (_alarmDays.isEmpty) {
+      DateTime scheduledTime =
+          DateTime(now.year, now.month, now.day, time.hour, time.minute);
+      if (scheduledTime.isBefore(now)) {
+        scheduledTime = scheduledTime.add(const Duration(days: 1));
+      }
+      await _scheduleOneAlarm(alarmId, scheduledTime);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt('alarmTime', scheduledTime.millisecondsSinceEpoch);
+      if (mounted) {
+        setState(() => _alarmTime = scheduledTime);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(
+                'Alarme programado para as ${intl.DateFormat('HH:mm').format(scheduledTime)}')));
+      }
+    } else {
+      DateTime? earliest;
+      for (final day in _alarmDays) {
+        DateTime scheduledTime =
+            DateTime(now.year, now.month, now.day, time.hour, time.minute);
+        while (scheduledTime.weekday != day || scheduledTime.isBefore(now)) {
+          scheduledTime = scheduledTime.add(const Duration(days: 1));
+        }
+        await _scheduleOneAlarm(10 + day, scheduledTime);
+        if (earliest == null || scheduledTime.isBefore(earliest)) {
+          earliest = scheduledTime;
+        }
+      }
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt('alarmTime', earliest!.millisecondsSinceEpoch);
+      await prefs.setInt('alarmHour', time.hour);
+      await prefs.setInt('alarmMinute', time.minute);
+      if (mounted) {
+        setState(() => _alarmTime = earliest);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(
+                'Alarme: ${intl.DateFormat('HH:mm').format(earliest)} (${_getDayNames()})')));
+      }
     }
+  }
 
+  Future<void> _scheduleOneAlarm(int id, DateTime scheduledTime) async {
     await flutterLocalNotificationsPlugin.zonedSchedule(
-      alarmId,
+      id,
       'A Voz da Cura Divina',
-      '¡Alarme! Toque para ouvir a rádio',
+      'Alarme! Toque para ouvir a rádio',
       tz.TZDateTime.from(scheduledTime, tz.local),
       const NotificationDetails(
         android: AndroidNotificationDetails(
@@ -708,34 +867,52 @@ class _RadioHomeState extends State<RadioHome>
       androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
       payload: 'alarm',
     );
-
     await AndroidAlarmManager.oneShotAt(
       scheduledTime,
-      alarmId,
+      id,
       playRadio,
       exact: true,
       wakeup: true,
       allowWhileIdle: true,
       rescheduleOnReboot: true,
     );
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt('alarmTime', scheduledTime.millisecondsSinceEpoch);
-    if (mounted) {
-      setState(() => _alarmTime = scheduledTime);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(
-              'Alarme programado para as ${intl.DateFormat('HH:mm').format(scheduledTime)}')));
-    }
+  }
+
+  String _getDayNames() {
+    final locale =
+        WidgetsBinding.instance.platformDispatcher.locale.languageCode;
+    final labels = locale == 'pt'
+        ? ['', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom']
+        : locale == 'es'
+            ? ['', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom']
+            : ['', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    final sorted = List<int>.from(_alarmDays)..sort();
+    return sorted.map((d) => labels[d]).join(', ');
   }
 
   Future<void> _cancelAlarm() async {
     if (!_supportsAndroidAlarm) return;
-    await flutterLocalNotificationsPlugin.cancel(alarmId);
-    await AndroidAlarmManager.cancel(alarmId);
+    await _cancelAlarmInternal();
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('alarmTime');
+    await prefs.remove('alarmDays');
+    await prefs.remove('alarmHour');
+    await prefs.remove('alarmMinute');
     if (mounted) {
-      setState(() => _alarmTime = null);
+      setState(() {
+        _alarmTime = null;
+        _alarmDays = [];
+      });
+    }
+  }
+
+  Future<void> _cancelAlarmInternal() async {
+    await flutterLocalNotificationsPlugin.cancel(alarmId);
+    await AndroidAlarmManager.cancel(alarmId);
+    for (int day = 1; day <= 7; day++) {
+      final id = 10 + day;
+      await flutterLocalNotificationsPlugin.cancel(id);
+      await AndroidAlarmManager.cancel(id);
     }
   }
 
@@ -1005,8 +1182,11 @@ class _RadioHomeState extends State<RadioHome>
                       const SizedBox(width: 8),
                       _CustomSwitch(
                         value: _isDarkMode,
-                        onChanged: (value) =>
-                            setState(() => _isDarkMode = value),
+                        onChanged: (value) async {
+                          setState(() => _isDarkMode = value);
+                          final prefs = await SharedPreferences.getInstance();
+                          await prefs.setBool('isDarkMode', value);
+                        },
                         isDarkMode: _isDarkMode,
                       ),
                     ],
@@ -1303,8 +1483,7 @@ class _RadioHomeState extends State<RadioHome>
                                                       size: 50))),
                                       const SizedBox(height: 40),
                                       GestureDetector(
-                                          onTap: () => _openWebMode(
-                                              "https://www.igrejaprimitivadoutrinadivina.com/"),
+                                          onTap: _showOverlayMenu,
                                           child: Column(children: [
                                             Container(
                                                 width: 70,
@@ -1377,32 +1556,22 @@ class _RadioHomeState extends State<RadioHome>
                       width: 140,
                       height: 140,
                       decoration: BoxDecoration(
-                          gradient:
-                              !_isDarkMode && _audioPlayer.playerState.playing
-                                  ? LinearGradient(
-                                      colors: [baseBgColor, headerBgColor],
-                                      begin: Alignment.topLeft,
-                                      end: Alignment.bottomRight)
-                                  : null,
                           color: _isDarkMode
-                              ? baseBgColor
-                              : (_audioPlayer.playerState.playing
-                                  ? null
-                                  : baseBgColor),
+                              ? Colors.black.withOpacity(0.2)
+                              : Colors.white.withOpacity(0.75),
                           shape: BoxShape.circle,
-                          border: _isDarkMode
-                              ? Border.all(
-                                  color: Colors.grey.shade700, width: 1)
-                              : null,
+                          border: Border.all(
+                              color: (_isDarkMode ? Colors.white : Colors.black)
+                                  .withOpacity(0.1)),
                           boxShadow: neumorphicShadows),
                       child: _isConnecting
                           ? LoadingAnimationWidget.inkDrop(
-                              color: playIconColor, size: 45.0)
+                              color: Colors.black, size: 45.0)
                           : Icon(
                               _audioPlayer.playerState.playing
                                   ? Icons.stop
                                   : Icons.play_arrow,
-                              color: playIconColor,
+                              color: Colors.black,
                               size: 70))),
               const SizedBox(height: 30),
               Container(
@@ -1416,17 +1585,17 @@ class _RadioHomeState extends State<RadioHome>
                     boxShadow: neumorphicShadows),
                 child: SliderTheme(
                   data: SliderTheme.of(context).copyWith(
-                    trackHeight: 8,
+                    trackHeight: 3,
                     thumbShape:
-                        const RoundSliderThumbShape(enabledThumbRadius: 12),
+                        const RoundSliderThumbShape(enabledThumbRadius: 8),
                     overlayShape:
-                        const RoundSliderOverlayShape(overlayRadius: 24),
+                        const RoundSliderOverlayShape(overlayRadius: 18),
                   ),
                   child: Slider(
                     value: _volume,
                     min: 0.0,
                     max: 1.0,
-                    activeColor: Colors.blue.shade700,
+                    activeColor: Colors.black,
                     inactiveColor: textColor.withOpacity(0.2),
                     onChanged: (val) {
                       setState(() => _volume = val);
@@ -1452,9 +1621,9 @@ class _RadioHomeState extends State<RadioHome>
             child: GestureDetector(
               onVerticalDragEnd: (d) {
                 if (d.primaryVelocity! < 0)
-                  _showLandscapeMenu(baseBgColor, textColor);
+                  _showOverlayMenu();
               },
-              onTap: () => _showLandscapeMenu(baseBgColor, textColor),
+              onTap: () => _showOverlayMenu(),
               child: Container(
                 width: 120,
                 height: 35,
@@ -1488,88 +1657,6 @@ class _RadioHomeState extends State<RadioHome>
     );
   }
 
-  void _showLandscapeMenu(Color baseBgColor, Color textColor) {
-    showModalBottomSheet(
-        context: context,
-        isScrollControlled: true,
-        backgroundColor: Colors.transparent,
-        builder: (BuildContext context) {
-          return Container(
-              height: MediaQuery.of(context).size.height * 0.85,
-              decoration: BoxDecoration(
-                  color: baseBgColor,
-                  borderRadius:
-                      const BorderRadius.vertical(top: Radius.circular(25))),
-              child: Column(children: [
-                const SizedBox(height: 10),
-                Container(
-                    width: 50,
-                    height: 6,
-                    decoration: BoxDecoration(
-                        color: textColor.withOpacity(0.3),
-                        borderRadius: BorderRadius.circular(3))),
-                const SizedBox(height: 20),
-                Text("MENÚ PRINCIPAL",
-                    style:
-                        GoogleFonts.bebasNeue(fontSize: 32, color: textColor)),
-                const SizedBox(height: 20),
-                Expanded(
-                  child: GridView.count(
-                    crossAxisCount: 3,
-                    mainAxisSpacing: 15,
-                    crossAxisSpacing: 15,
-                    childAspectRatio: 1.2,
-                    padding: const EdgeInsets.all(20),
-                    children: [
-                      _buildLandscapeGridItem(Icons.timer, "Temporizador",
-                          _showTimerAndAlarmDialog, textColor),
-                      _buildLandscapeGridItem(Icons.alarm, "Alarme",
-                          _showTimerAndAlarmDialog, textColor),
-                      _buildLandscapeGridItem(
-                          Icons.language, "Site", () {}, textColor),
-                      _buildLandscapeGridItem(Icons.replay, "Reprise",
-                          _showTimerAndAlarmDialog, textColor),
-                      _buildLandscapeGridItem(
-                          Icons.share, "Compartilhar", () {}, textColor),
-                      _buildLandscapeGridItem(Icons.exit_to_app, "Sair",
-                          () => SystemNavigator.pop(), textColor),
-                    ],
-                  ),
-                )
-              ]));
-        });
-  }
-
-  Widget _buildLandscapeGridItem(
-      IconData icon, String title, VoidCallback onTap, Color textColor) {
-    return GestureDetector(
-        onTap: () {
-          Navigator.pop(context);
-          onTap();
-        },
-        child: Container(
-            decoration: BoxDecoration(
-                color: _isDarkMode
-                    ? Colors.white10
-                    : Colors.black.withOpacity(0.05),
-                borderRadius: BorderRadius.circular(15),
-                border: Border.all(
-                    color: (_isDarkMode ? Colors.white : Colors.black)
-                        .withOpacity(0.05))),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(icon, color: Colors.blue.shade700, size: 45),
-                const SizedBox(height: 12),
-                Text(title,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                        color: textColor,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 13)),
-              ],
-            )));
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -1636,7 +1723,7 @@ class _RadioHomeState extends State<RadioHome>
         resizeToAvoidBottomInset: false,
         drawer: MediaQuery.of(context).orientation == Orientation.landscape
             ? null
-            : _buildDrawer(context),
+            : null, // Drawer deshabilitado en retrato a petición del usuario
         backgroundColor: Colors.transparent,
         body: Stack(
           children: [
@@ -2128,6 +2215,426 @@ class _RadioHomeState extends State<RadioHome>
       ),
     );
   }
+
+  void _showOverlayMenu() {
+    if (_isNavigating) return;
+    _isNavigating = true;
+    Future.delayed(const Duration(milliseconds: 250), () {
+      if (mounted) _isNavigating = false;
+    });
+    showGeneralDialog(
+      context: context,
+      barrierDismissible: false,
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 600),
+      pageBuilder: (context, animation, secondaryAnimation) => const SizedBox(),
+      transitionBuilder: (context, animation, secondaryAnimation, child) {
+        final screenWidth = MediaQuery.of(context).size.width;
+        final screenHeight = MediaQuery.of(context).size.height;
+        final isLandscape =
+            MediaQuery.of(context).orientation == Orientation.landscape;
+
+        // Centro de expansión (Zona del icono WEBSITE)
+        Offset startCenter = isLandscape
+            ? Offset(screenWidth * 0.75, screenHeight * 0.5)
+            : Offset(screenWidth * 0.75, screenHeight * 0.85);
+
+        // Centro de contracción (Zona de la X)
+        Offset endCenter = Offset(screenWidth - 50, 50);
+
+        // Elegir centro según si está abriendo o cerrando
+        bool isClosing = animation.status == AnimationStatus.reverse;
+        Offset activeCenter = isClosing ? endCenter : startCenter;
+
+        final overlayBgColors = _isDarkMode
+            ? const Color(0xFF0A192F).withOpacity(0.88)
+            : const Color(0xFF80DEEA).withOpacity(0.85);
+
+        return ClipPath(
+          clipper: _CircularRevealClipper(
+            fraction: CurvedAnimation(
+              parent: animation,
+              curve: const Interval(0.0, 0.33, curve: Curves.easeOut),
+            ).value,
+            center: activeCenter,
+          ),
+          child: Scaffold(
+            backgroundColor: Colors.transparent,
+            body: Stack(
+              children: [
+                Positioned.fill(
+                  child: BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+                    child: Container(color: overlayBgColors),
+                  ),
+                ),
+                SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 30.0, vertical: 25.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildStaggeredItem(animation, 0, child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Image.asset('assets/logoipdd.webp', height: 60),
+                          _PulseCloseButton(onClose: () => Navigator.pop(context)),
+                        ],
+                      )),
+                      const SizedBox(height: 18),
+                      _buildStaggeredItem(
+                        animation,
+                        1,
+                        child: Container(
+                          padding: const EdgeInsets.all(18),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.85),
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(
+                                color: Colors.black.withOpacity(0.08)),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.1),
+                                blurRadius: 10,
+                                offset: const Offset(0, 4),
+                              ),
+                            ],
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text("Versículo Diário",
+                                  style: GoogleFonts.inter(
+                                      fontSize: 18,
+                                      fontWeight: FontWeight.w800,
+                                      color: Colors.blue.shade800)),
+                              const SizedBox(height: 8),
+                              Text("«${obtenerVersiculoDelDia()}»",
+                                  style: GoogleFonts.inter(
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.w600,
+                                      color: const Color(0xFF4E7F8E))),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 35),
+                      Expanded(
+                        child: SingleChildScrollView(
+                          physics: const BouncingScrollPhysics(),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Padding(
+                                padding: const EdgeInsets.only(left: 28.0),
+                                child: _buildMenuMainItem(
+                                    animation,
+                                    2,
+                                    "Website",
+                                    () => _openWebMenuLink(
+                                        "https://www.igrejaprimitivadoutrinadivina.com/")),
+                              ),
+                              ...[
+                                _buildMenuSubItem(
+                                    animation,
+                                    3,
+                                    "Reprises - Audios",
+                                    "https://igrejaprimitivadoutrinadivina.com/internas/audios"),
+                                _buildMenuSubItem(
+                                    animation,
+                                    4,
+                                    "Contato",
+                                    "https://www.igrejaprimitivadoutrinadivina.com/contato"),
+                                _buildMenuSubItem(
+                                    animation,
+                                    5,
+                                    "Pedidos de Oração",
+                                    "https://www.igrejaprimitivadoutrinadivina.com/recados"),
+                                _buildMenuSubItem(
+                                    animation,
+                                    6,
+                                    "Endereços",
+                                    "https://igrejaprimitivadoutrinadivina.com/internas/enderecos-ipdd"),
+                                _buildMenuSubItem(
+                                    animation,
+                                    7,
+                                    "Ajude esta obra",
+                                    "https://www.igrejaprimitivadoutrinadivina.com/internas/contas-bancarias",
+                                    "(Contas e Pix)"),
+                              ].map((item) => Padding(
+                                  padding: const EdgeInsets.only(left: 28.0),
+                                  child: item)),
+                              const SizedBox(height: 25),
+                              Padding(
+                                padding: const EdgeInsets.only(left: 28.0),
+                                child: _buildMenuMainItem(animation, 8,
+                                    "Alarme", () {
+                                  if (!mounted || _isNavigating) return;
+                                  _isNavigating = true;
+                                  Navigator.pop(context);
+                                  _showTimerAndAlarmDialog();
+                                  Future.delayed(const Duration(milliseconds: 500), () {
+                                    if (mounted) _isNavigating = false;
+                                  });
+                                }, subText: "e Temporizador"),
+                              ),
+                              const SizedBox(height: 15),
+                              Padding(
+                                padding: const EdgeInsets.only(left: 28.0),
+                                child: _buildMenuMainItem(animation, 9, "Compartilhar",
+                                    () {
+                                  if (!mounted || _isNavigating) return;
+                                  _isNavigating = true;
+                                  Navigator.pop(context);
+                                  Share.share(
+                                      'Confira A Voz da Cura Divina: https://play.google.com/store/apps/details?id=com.kym.lavozdelacuradivina.radio');
+                                  Future.delayed(const Duration(milliseconds: 500), () {
+                                    if (mounted) _isNavigating = false;
+                                  });
+                                }),
+                              ),
+                              const SizedBox(height: 40),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    },
+    );
+  }
+
+  void _openWebMenuLink(String url) {
+    if (!mounted || _isNavigating) return;
+    _isNavigating = true;
+    Navigator.pop(context);
+    _openWebMode(url);
+    Future.delayed(const Duration(milliseconds: 500), () {
+      if (mounted) _isNavigating = false;
+    });
+  }
+
+  Widget _buildStaggeredItem(Animation<double> animation, int index,
+      {required Widget child}) {
+    final start = (index * 0.10).clamp(0.0, 0.7);
+    final end = (start + 0.55).clamp(0.0, 1.0);
+
+    final slideAnimation = Tween<Offset>(
+      begin: const Offset(0, 0.6),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(
+      parent: animation,
+      curve: Interval(start, end, curve: Curves.easeOutBack),
+    ));
+
+    final scaleAnimation = Tween<double>(
+      begin: 0.88,
+      end: 1.0,
+    ).animate(CurvedAnimation(
+      parent: animation,
+      curve: Interval(start, end, curve: Curves.easeOutBack),
+    ));
+
+    final blurAnimation = CurvedAnimation(
+      parent: animation,
+      curve: Interval(start, end, curve: Curves.easeOut),
+    );
+
+    return FadeTransition(
+      opacity: CurvedAnimation(
+        parent: animation,
+        curve: Interval(start, end, curve: Curves.easeOut),
+      ),
+      child: SlideTransition(
+        position: slideAnimation,
+        child: ScaleTransition(
+          scale: scaleAnimation,
+          alignment: Alignment.centerLeft,
+          child: AnimatedBuilder(
+            animation: blurAnimation,
+            builder: (context, child) {
+              final sigma = lerpDouble(12.0, 0.0, blurAnimation.value) ?? 0.0;
+              if (sigma <= 0.0) return child!;
+              return ImageFiltered(
+                imageFilter: ImageFilter.blur(sigmaX: sigma, sigmaY: sigma),
+                child: child,
+              );
+            },
+            child: child,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMenuMainItem(
+    Animation<double> animation, int index, String title, VoidCallback onTap,
+    {String? subText}) {
+  return _buildStaggeredItem(
+    animation,
+    index,
+    child: GestureDetector(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8.0),
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.centerLeft,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
+            children: [
+              Text(
+                title,
+                style: GoogleFonts.inter(
+                  fontSize: 30,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -0.5,
+                  height: 1.05,
+                  color: const Color(0xFF4E7F8E), // azul grisáceo
+                ),
+              ),
+              if (subText != null) ...[
+                const SizedBox(width: 15),
+                Text(
+                  subText,
+                  style: GoogleFonts.inter(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w400,
+                    color: _isDarkMode
+                        ? const Color(0xFF8BB1BC).withOpacity(0.5)
+                        : Colors.black.withOpacity(0.40),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+  Widget _buildMenuSubItem(Animation<double> animation, int index, String title,
+    String url, [String? subText]) {
+  return _buildStaggeredItem(
+    animation,
+    index,
+    child: GestureDetector(
+      onTap: () => _openWebMenuLink(url),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6.0),
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.centerLeft,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
+            children: [
+              Text(
+                title,
+                style: GoogleFonts.inter(
+                  fontSize: 30,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -0.5,
+                  height: 1.05,
+                  color: _isDarkMode
+                      ? const Color(0xFF8BB1BC) // Tonalidad más clara del azul grisáceo
+                      : Colors.black.withOpacity(0.75),
+                ),
+              ),
+              if (subText != null) ...[
+                const SizedBox(width: 10),
+                Text(
+                  subText,
+                  style: GoogleFonts.inter(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w400,
+                    color: _isDarkMode
+                        ? const Color(0xFF8BB1BC).withOpacity(0.5)
+                        : Colors.black.withOpacity(0.35),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+}
+}
+
+
+class _PulseCloseButton extends StatefulWidget {
+  final VoidCallback onClose;
+  const _PulseCloseButton({Key? key, required this.onClose}) : super(key: key);
+
+  @override
+  _PulseCloseButtonState createState() => _PulseCloseButtonState();
+}
+
+class _PulseCloseButtonState extends State<_PulseCloseButton>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _scale;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 250));
+
+    _scale = TweenSequence<double>([
+      TweenSequenceItem(
+        tween: Tween<double>(begin: 1.0, end: 1.3)
+            .chain(CurveTween(curve: Curves.easeOut)),
+        weight: 40,
+      ),
+      TweenSequenceItem(
+        tween: ConstantTween<double>(1.3),
+        weight: 10,
+      ),
+      TweenSequenceItem(
+        tween: Tween<double>(begin: 1.3, end: 0.0)
+            .chain(CurveTween(curve: Curves.easeIn)),
+        weight: 50,
+      ),
+    ]).animate(_controller);
+
+    _controller.addStatusListener((status) {
+      if (status == AnimationStatus.completed) {
+        widget.onClose();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ScaleTransition(
+      scale: _scale,
+      child: GestureDetector(
+        onTap: () => _controller.forward(),
+        child: const Padding(
+          padding: EdgeInsets.all(8.0),
+          child: Icon(Icons.close, color: Colors.black, size: 42),
+        ),
+      ),
+    );
+  }
 }
 
 class _BlinkingLiveIndicator extends StatefulWidget {
@@ -2237,5 +2744,36 @@ class _CustomSwitch extends StatelessWidget {
                     child: Icon(value ? Icons.nightlight_round : Icons.wb_sunny,
                         color: value ? Colors.white : Colors.black,
                         size: 16.0)))));
+  }
+}
+
+class _CircularRevealClipper extends CustomClipper<Path> {
+  final double fraction;
+  final Offset center;
+
+  _CircularRevealClipper({required this.fraction, required this.center});
+
+  @override
+  Path getClip(Size size) {
+    final Path path = Path();
+
+    double maxRadius = _distance(center, Offset.zero);
+    maxRadius = Math.max(maxRadius, _distance(center, Offset(size.width, 0)));
+    maxRadius = Math.max(maxRadius, _distance(center, Offset(0, size.height)));
+    maxRadius = Math.max(
+        maxRadius, _distance(center, Offset(size.width, size.height)));
+
+    path.addOval(
+        Rect.fromCircle(center: center, radius: maxRadius * fraction));
+    return path;
+  }
+
+  double _distance(Offset a, Offset b) {
+    return Math.sqrt(Math.pow(a.dx - b.dx, 2) + Math.pow(a.dy - b.dy, 2));
+  }
+
+  @override
+  bool shouldReclip(_CircularRevealClipper oldClipper) {
+    return oldClipper.fraction != fraction || oldClipper.center != center;
   }
 }
