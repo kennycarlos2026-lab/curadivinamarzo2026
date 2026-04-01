@@ -21,6 +21,7 @@ import 'package:intl/date_symbol_data_local.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sleek_circular_slider/sleek_circular_slider.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_remote_config/firebase_remote_config.dart';
 import 'firebase_options.dart';
 import 'banner_avisos.dart';
 import 'versiculos_promesas.dart';
@@ -52,7 +53,7 @@ void playRadio() async {
             'com.kym.lavozdelacuradivina.radio.channel.alarm',
         androidNotificationChannelName: 'Radio A Voz da Cura Divina - Alarma',
         androidNotificationOngoing: true,
-        androidNotificationIcon: 'drawable/ic_notification',
+        androidNotificationIcon: 'drawable/ic_stat_igual1',
       );
     }
     const String streamUrl = 'https://s10.maxcast.com.br:9083/live';
@@ -74,6 +75,23 @@ void playRadio() async {
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   debugPrint("Handling a background message: ${message.messageId}");
+}
+
+Future<String> _loadStreamUrl() async {
+  final remoteConfig = FirebaseRemoteConfig.instance;
+  await remoteConfig.setConfigSettings(RemoteConfigSettings(
+    fetchTimeout: const Duration(seconds: 10),
+    minimumFetchInterval: const Duration(hours: 1),
+  ));
+  await remoteConfig.setDefaults({
+    'stream_url': 'https://s10.maxcast.com.br:9083/live',
+  });
+  try {
+    await remoteConfig.fetchAndActivate();
+  } catch (e) {
+    debugPrint('Remote config fetch failed: $e');
+  }
+  return remoteConfig.getString('stream_url');
 }
 
 void main() async {
@@ -124,7 +142,7 @@ void main() async {
 
   tz.initializeTimeZones();
   const AndroidInitializationSettings initializationSettingsAndroid =
-      AndroidInitializationSettings('ic_notification');
+      AndroidInitializationSettings('ic_stat_igual1');
   const InitializationSettings initializationSettings =
       InitializationSettings(android: initializationSettingsAndroid);
   await flutterLocalNotificationsPlugin.initialize(
@@ -152,7 +170,7 @@ void main() async {
         androidNotificationChannelName: 'Radio A Voz da Cura Divina',
         androidNotificationOngoing: true,
         notificationColor: const Color(0xFF80DEEA),
-        androidNotificationIcon: 'drawable/ic_notification',
+        androidNotificationIcon: 'drawable/ic_stat_igual1',
       );
     }
     final session = await AudioSession.instance;
@@ -160,12 +178,16 @@ void main() async {
   } catch (e) {
     debugPrint('Error inicializando plugins de audio: $e');
   }
-  runApp(MyApp(autoPlay: autoPlay));
+
+  final streamUrl = await _loadStreamUrl();
+  runApp(MyApp(autoPlay: autoPlay, streamUrl: streamUrl));
 }
 
 class MyApp extends StatelessWidget {
   final bool autoPlay;
-  const MyApp({Key? key, this.autoPlay = false}) : super(key: key);
+  final String streamUrl; // AGREGAR
+  const MyApp({Key? key, this.autoPlay = false, required this.streamUrl})
+      : super(key: key);
 
   @override
   Widget build(BuildContext context) {
@@ -174,15 +196,17 @@ class MyApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(brightness: Brightness.light),
       darkTheme: ThemeData(brightness: Brightness.dark),
-      home: RadioHome(autoPlay: autoPlay),
+      home: RadioHome(
+          autoPlay: autoPlay, streamUrl: streamUrl), // AGREGAR streamUrl
     );
   }
 }
 
 class RadioHome extends StatefulWidget {
   final bool autoPlay;
-  const RadioHome({Key? key, this.autoPlay = false}) : super(key: key);
-  static const String streamUrl = 'https://s10.maxcast.com.br:9083/live';
+  final String streamUrl; // AGREGAR
+  const RadioHome({Key? key, this.autoPlay = false, required this.streamUrl})
+      : super(key: key);
 
   @override
   State<RadioHome> createState() => _RadioHomeState();
@@ -217,7 +241,8 @@ class _RadioHomeState extends State<RadioHome>
   bool _isDragging = false;
 
   late AnimationController _equalizerController;
-  String _marqueeText = ''; // Variable para el texto en movimiento del mini player
+  String _marqueeText =
+      ''; // Variable para el texto en movimiento del mini player
 
   bool get _supportsAndroidAlarm =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
@@ -375,13 +400,14 @@ class _RadioHomeState extends State<RadioHome>
     setState(() => _errorMessage = '');
     try {
       final mediaItem = MediaItem(
-        id: RadioHome.streamUrl,
+        id: widget.streamUrl, // CAMBIAR
         title: 'A Voz da Cura Divina',
         artist: 'Radio ao vivo',
         artUri: Uri.parse('https://i.ibb.co/XZKxHq3x/LOGOFONDOBARAPPok.jpg'),
       );
       await _audioPlayer.setAudioSource(
-          AudioSource.uri(Uri.parse(RadioHome.streamUrl), tag: mediaItem),
+          AudioSource.uri(Uri.parse(widget.streamUrl),
+              tag: mediaItem), // CAMBIAR
           preload: false);
     } catch (e) {
       final errorStr = e.toString();
@@ -713,8 +739,8 @@ class _RadioHomeState extends State<RadioHome>
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(20)),
               title: Text('Dias da semana',
-                  style: TextStyle(
-                      color: txtColor, fontWeight: FontWeight.bold)),
+                  style:
+                      TextStyle(color: txtColor, fontWeight: FontWeight.bold)),
               content: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -1620,8 +1646,7 @@ class _RadioHomeState extends State<RadioHome>
             alignment: Alignment.bottomCenter,
             child: GestureDetector(
               onVerticalDragEnd: (d) {
-                if (d.primaryVelocity! < 0)
-                  _showOverlayMenu();
+                if (d.primaryVelocity! < 0) _showOverlayMenu();
               },
               onTap: () => _showOverlayMenu(),
               child: Container(
@@ -1656,7 +1681,6 @@ class _RadioHomeState extends State<RadioHome>
       ],
     );
   }
-
 
   @override
   Widget build(BuildContext context) {
@@ -1922,7 +1946,8 @@ class _RadioHomeState extends State<RadioHome>
     final contrastColor = _isDarkMode ? Colors.white : Colors.black;
     final secondaryTextColor = _isDarkMode ? Colors.white70 : Colors.black87;
 
-    final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
+    final isLandscape =
+        MediaQuery.of(context).orientation == Orientation.landscape;
     if (isLandscape && _isWebMode) {
       return Align(
         alignment: Alignment.centerRight,
@@ -1932,7 +1957,8 @@ class _RadioHomeState extends State<RadioHome>
             filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
             child: Container(
               width: 52,
-              margin: const EdgeInsets.only(right: 34), // Un poco más separado para asegurar visibilidad
+              margin: const EdgeInsets.only(
+                  right: 34), // Un poco más separado para asegurar visibilidad
               padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
               decoration: BoxDecoration(
                 color: playerBgColor,
@@ -2117,28 +2143,28 @@ class _RadioHomeState extends State<RadioHome>
                         ),
                       ),
 
-                  // Columna lateral derecha: Logos + Flecha colapso rápida
-                  GestureDetector(
-                    onTap: () => setState(() => _isWebMode = false),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Image.asset(
-                          'assets/nuevologoblanco.png',
-                          width: 31, // 30% más pequeño (antes 44)
-                          height: 31,
-                          fit: BoxFit.contain,
-                          filterQuality: FilterQuality.high,
+                      // Columna lateral derecha: Logos + Flecha colapso rápida
+                      GestureDetector(
+                        onTap: () => setState(() => _isWebMode = false),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Image.asset(
+                              'assets/nuevologoblanco.png',
+                              width: 31, // 30% más pequeño (antes 44)
+                              height: 31,
+                              fit: BoxFit.contain,
+                              filterQuality: FilterQuality.high,
+                            ),
+                            const SizedBox(height: 2),
+                            Icon(
+                              Icons.keyboard_double_arrow_up,
+                              color: contrastColor.withOpacity(0.9),
+                              size: 20,
+                            ),
+                          ],
                         ),
-                        const SizedBox(height: 2),
-                        Icon(
-                          Icons.keyboard_double_arrow_up,
-                          color: contrastColor.withOpacity(0.9),
-                          size: 20,
-                        ),
-                      ],
-                    ),
-                  ),
+                      ),
                     ],
                   ),
                 ),
@@ -2269,145 +2295,143 @@ class _RadioHomeState extends State<RadioHome>
                   ),
                 ),
                 SafeArea(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 30.0, vertical: 25.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _buildStaggeredItem(animation, 0, child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Image.asset('assets/logoipdd.webp', height: 60),
-                          _PulseCloseButton(onClose: () => Navigator.pop(context)),
-                        ],
-                      )),
-                      const SizedBox(height: 18),
-                      _buildStaggeredItem(
-                        animation,
-                        1,
-                        child: Container(
-                          padding: const EdgeInsets.all(18),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withOpacity(0.85),
-                            borderRadius: BorderRadius.circular(16),
-                            border: Border.all(
-                                color: Colors.black.withOpacity(0.08)),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withOpacity(0.1),
-                                blurRadius: 10,
-                                offset: const Offset(0, 4),
-                              ),
-                            ],
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text("Versículo Diário",
-                                  style: GoogleFonts.inter(
-                                      fontSize: 18,
-                                      fontWeight: FontWeight.w800,
-                                      color: Colors.blue.shade800)),
-                              const SizedBox(height: 8),
-                              Text("«${obtenerVersiculoDelDia()}»",
-                                  style: GoogleFonts.inter(
-                                      fontSize: 15,
-                                      fontWeight: FontWeight.w600,
-                                      color: const Color(0xFF4E7F8E))),
-                            ],
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 30.0, vertical: 25.0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _buildStaggeredItem(animation, 0,
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Image.asset('assets/logoipdd.webp', height: 60),
+                                _PulseCloseButton(
+                                    onClose: () => Navigator.pop(context)),
+                              ],
+                            )),
+                        const SizedBox(height: 18),
+                        _buildStaggeredItem(
+                          animation,
+                          1,
+                          child: Container(
+                            padding: const EdgeInsets.all(18),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.85),
+                              borderRadius: BorderRadius.circular(16),
+                              border: Border.all(
+                                  color: Colors.black.withOpacity(0.08)),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withOpacity(0.1),
+                                  blurRadius: 10,
+                                  offset: const Offset(0, 4),
+                                ),
+                              ],
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text("Versículo Diário",
+                                    style: GoogleFonts.inter(
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.w800,
+                                        color: Colors.blue.shade800)),
+                                const SizedBox(height: 8),
+                                Text("«${obtenerVersiculoDelDia()}»",
+                                    style: GoogleFonts.inter(
+                                        fontSize: 15,
+                                        fontWeight: FontWeight.w600,
+                                        color: const Color(0xFF4E7F8E))),
+                              ],
+                            ),
                           ),
                         ),
-                      ),
-                      const SizedBox(height: 35),
-                      Expanded(
-                        child: SingleChildScrollView(
-                          physics: const BouncingScrollPhysics(),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Padding(
-                                padding: const EdgeInsets.only(left: 28.0),
-                                child: _buildMenuMainItem(
-                                    animation,
-                                    2,
-                                    "Website",
-                                    () => _openWebMenuLink(
-                                        "https://www.igrejaprimitivadoutrinadivina.com/")),
-                              ),
-                              ...[
-                                _buildMenuSubItem(
-                                    animation,
-                                    3,
-                                    "Reprises - Audios",
-                                    "https://igrejaprimitivadoutrinadivina.com/internas/audios"),
-                                _buildMenuSubItem(
-                                    animation,
-                                    4,
-                                    "Contato",
-                                    "https://www.igrejaprimitivadoutrinadivina.com/contato"),
-                                _buildMenuSubItem(
-                                    animation,
-                                    5,
-                                    "Pedidos de Oração",
-                                    "https://www.igrejaprimitivadoutrinadivina.com/recados"),
-                                _buildMenuSubItem(
-                                    animation,
-                                    6,
-                                    "Endereços",
-                                    "https://igrejaprimitivadoutrinadivina.com/internas/enderecos-ipdd"),
-                                _buildMenuSubItem(
-                                    animation,
-                                    7,
-                                    "Ajude esta obra",
-                                    "https://www.igrejaprimitivadoutrinadivina.com/internas/contas-bancarias",
-                                    "(Contas e Pix)"),
-                              ].map((item) => Padding(
+                        const SizedBox(height: 35),
+                        Expanded(
+                          child: SingleChildScrollView(
+                            physics: const BouncingScrollPhysics(),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Padding(
                                   padding: const EdgeInsets.only(left: 28.0),
-                                  child: item)),
-                              const SizedBox(height: 25),
-                              Padding(
-                                padding: const EdgeInsets.only(left: 28.0),
-                                child: _buildMenuMainItem(animation, 8,
-                                    "Alarme", () {
-                                  if (!mounted || _isNavigating) return;
-                                  _isNavigating = true;
-                                  Navigator.pop(context);
-                                  _showTimerAndAlarmDialog();
-                                  Future.delayed(const Duration(milliseconds: 500), () {
-                                    if (mounted) _isNavigating = false;
-                                  });
-                                }, subText: "e Temporizador"),
-                              ),
-                              const SizedBox(height: 15),
-                              Padding(
-                                padding: const EdgeInsets.only(left: 28.0),
-                                child: _buildMenuMainItem(animation, 9, "Compartilhar",
-                                    () {
-                                  if (!mounted || _isNavigating) return;
-                                  _isNavigating = true;
-                                  Navigator.pop(context);
-                                  Share.share(
-                                      'Confira A Voz da Cura Divina: https://play.google.com/store/apps/details?id=com.kym.lavozdelacuradivina.radio');
-                                  Future.delayed(const Duration(milliseconds: 500), () {
-                                    if (mounted) _isNavigating = false;
-                                  });
-                                }),
-                              ),
-                              const SizedBox(height: 40),
-                            ],
+                                  child: _buildMenuMainItem(
+                                      animation,
+                                      2,
+                                      "Website",
+                                      () => _openWebMenuLink(
+                                          "https://www.igrejaprimitivadoutrinadivina.com/")),
+                                ),
+                                ...[
+                                  _buildMenuSubItem(
+                                      animation,
+                                      3,
+                                      "Reprises - Audios",
+                                      "https://igrejaprimitivadoutrinadivina.com/internas/audios"),
+                                  _buildMenuSubItem(animation, 4, "Contato",
+                                      "https://www.igrejaprimitivadoutrinadivina.com/contato"),
+                                  _buildMenuSubItem(
+                                      animation,
+                                      5,
+                                      "Pedidos de Oração",
+                                      "https://www.igrejaprimitivadoutrinadivina.com/recados"),
+                                  _buildMenuSubItem(animation, 6, "Endereços",
+                                      "https://igrejaprimitivadoutrinadivina.com/internas/enderecos-ipdd"),
+                                  _buildMenuSubItem(
+                                      animation,
+                                      7,
+                                      "Ajude esta obra",
+                                      "https://www.igrejaprimitivadoutrinadivina.com/internas/contas-bancarias",
+                                      "(Contas e Pix)"),
+                                ].map((item) => Padding(
+                                    padding: const EdgeInsets.only(left: 28.0),
+                                    child: item)),
+                                const SizedBox(height: 25),
+                                Padding(
+                                  padding: const EdgeInsets.only(left: 28.0),
+                                  child: _buildMenuMainItem(
+                                      animation, 8, "Alarme", () {
+                                    if (!mounted || _isNavigating) return;
+                                    _isNavigating = true;
+                                    Navigator.pop(context);
+                                    _showTimerAndAlarmDialog();
+                                    Future.delayed(
+                                        const Duration(milliseconds: 500), () {
+                                      if (mounted) _isNavigating = false;
+                                    });
+                                  }, subText: "e Temporizador"),
+                                ),
+                                const SizedBox(height: 15),
+                                Padding(
+                                  padding: const EdgeInsets.only(left: 28.0),
+                                  child: _buildMenuMainItem(
+                                      animation, 9, "Compartilhar", () {
+                                    if (!mounted || _isNavigating) return;
+                                    _isNavigating = true;
+                                    Navigator.pop(context);
+                                    Share.share(
+                                        'Confira A Voz da Cura Divina: https://play.google.com/store/apps/details?id=com.kym.lavozdelacuradivina.radio');
+                                    Future.delayed(
+                                        const Duration(milliseconds: 500), () {
+                                      if (mounted) _isNavigating = false;
+                                    });
+                                  }),
+                                ),
+                                const SizedBox(height: 40),
+                              ],
+                            ),
                           ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
-        ),
-      );
-    },
+        );
+      },
     );
   }
 
@@ -2475,103 +2499,104 @@ class _RadioHomeState extends State<RadioHome>
   }
 
   Widget _buildMenuMainItem(
-    Animation<double> animation, int index, String title, VoidCallback onTap,
-    {String? subText}) {
-  return _buildStaggeredItem(
-    animation,
-    index,
-    child: GestureDetector(
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 8.0),
-        child: FittedBox(
-          fit: BoxFit.scaleDown,
-          alignment: Alignment.centerLeft,
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.baseline,
-            textBaseline: TextBaseline.alphabetic,
-            children: [
-              Text(
-                title,
-                style: GoogleFonts.inter(
-                  fontSize: 30,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: -0.5,
-                  height: 1.05,
-                  color: const Color(0xFF4E7F8E), // azul grisáceo
-                ),
-              ),
-              if (subText != null) ...[
-                const SizedBox(width: 15),
+      Animation<double> animation, int index, String title, VoidCallback onTap,
+      {String? subText}) {
+    return _buildStaggeredItem(
+      animation,
+      index,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8.0),
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
+              children: [
                 Text(
-                  subText,
+                  title,
                   style: GoogleFonts.inter(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w400,
-                    color: _isDarkMode
-                        ? const Color(0xFF8BB1BC).withOpacity(0.5)
-                        : Colors.black.withOpacity(0.40),
+                    fontSize: 30,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: -0.5,
+                    height: 1.05,
+                    color: const Color(0xFF4E7F8E), // azul grisáceo
                   ),
                 ),
+                if (subText != null) ...[
+                  const SizedBox(width: 15),
+                  Text(
+                    subText,
+                    style: GoogleFonts.inter(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w400,
+                      color: _isDarkMode
+                          ? const Color(0xFF8BB1BC).withOpacity(0.5)
+                          : Colors.black.withOpacity(0.40),
+                    ),
+                  ),
+                ],
               ],
-            ],
+            ),
           ),
         ),
       ),
-    ),
-  );
-}
+    );
+  }
 
-  Widget _buildMenuSubItem(Animation<double> animation, int index, String title,
-    String url, [String? subText]) {
-  return _buildStaggeredItem(
-    animation,
-    index,
-    child: GestureDetector(
-      onTap: () => _openWebMenuLink(url),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 6.0),
-        child: FittedBox(
-          fit: BoxFit.scaleDown,
-          alignment: Alignment.centerLeft,
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.baseline,
-            textBaseline: TextBaseline.alphabetic,
-            children: [
-              Text(
-                title,
-                style: GoogleFonts.inter(
-                  fontSize: 30,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: -0.5,
-                  height: 1.05,
-                  color: _isDarkMode
-                      ? const Color(0xFF8BB1BC) // Tonalidad más clara del azul grisáceo
-                      : Colors.black.withOpacity(0.75),
-                ),
-              ),
-              if (subText != null) ...[
-                const SizedBox(width: 10),
+  Widget _buildMenuSubItem(
+      Animation<double> animation, int index, String title, String url,
+      [String? subText]) {
+    return _buildStaggeredItem(
+      animation,
+      index,
+      child: GestureDetector(
+        onTap: () => _openWebMenuLink(url),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6.0),
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
+              children: [
                 Text(
-                  subText,
+                  title,
                   style: GoogleFonts.inter(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w400,
+                    fontSize: 30,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: -0.5,
+                    height: 1.05,
                     color: _isDarkMode
-                        ? const Color(0xFF8BB1BC).withOpacity(0.5)
-                        : Colors.black.withOpacity(0.35),
+                        ? const Color(
+                            0xFF8BB1BC) // Tonalidad más clara del azul grisáceo
+                        : Colors.black.withOpacity(0.75),
                   ),
                 ),
+                if (subText != null) ...[
+                  const SizedBox(width: 10),
+                  Text(
+                    subText,
+                    style: GoogleFonts.inter(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w400,
+                      color: _isDarkMode
+                          ? const Color(0xFF8BB1BC).withOpacity(0.5)
+                          : Colors.black.withOpacity(0.35),
+                    ),
+                  ),
+                ],
               ],
-            ],
+            ),
           ),
         ),
       ),
-    ),
-  );
+    );
+  }
 }
-}
-
 
 class _PulseCloseButton extends StatefulWidget {
   final VoidCallback onClose;
@@ -2760,11 +2785,10 @@ class _CircularRevealClipper extends CustomClipper<Path> {
     double maxRadius = _distance(center, Offset.zero);
     maxRadius = Math.max(maxRadius, _distance(center, Offset(size.width, 0)));
     maxRadius = Math.max(maxRadius, _distance(center, Offset(0, size.height)));
-    maxRadius = Math.max(
-        maxRadius, _distance(center, Offset(size.width, size.height)));
+    maxRadius =
+        Math.max(maxRadius, _distance(center, Offset(size.width, size.height)));
 
-    path.addOval(
-        Rect.fromCircle(center: center, radius: maxRadius * fraction));
+    path.addOval(Rect.fromCircle(center: center, radius: maxRadius * fraction));
     return path;
   }
 
