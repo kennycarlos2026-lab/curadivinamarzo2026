@@ -6,6 +6,7 @@ plugins {
     id "org.jetbrains.kotlin.android"
     // El Flutter Gradle Plugin debe aplicarse después de los plugins de Android y Kotlin.
     id "dev.flutter.flutter-gradle-plugin"
+    id 'com.google.firebase.crashlytics'
 }
 
 def localProperties = new Properties()

@@ -1,0 +1,346 @@
+diff --git a/lib/main.dart b/lib/main.dart
+index 8ef8b8c..c7e0a8e 100644
+--- a/lib/main.dart
++++ b/lib/main.dart
+@@ -1,4 +1,3 @@
+-
+ import 'dart:async';
+ import 'dart:isolate';
+ import 'dart:ui';
+@@ -8,6 +7,7 @@ import 'package:flutter/services.dart';
+ import 'package:google_fonts/google_fonts.dart';
+ import 'package:just_audio/just_audio.dart';
+ import 'package:url_launcher/url_launcher.dart';
++import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+ 
+ import 'package:just_audio_background/just_audio_background.dart';
+ import 'package:audio_session/audio_session.dart';
+@@ -193,6 +193,14 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
+   Timer? _uiUpdateTimer;
+   DateTime? _alarmTime;
+   static const int alarmId = 0;
++  static const String chavePix = "TU_CLAVE_AQUI";
++
++  // Web View State
++  bool _isWebMode = false;
++  String _currentWebUrl = '';
++  InAppWebViewController? _webViewController;
++  double _dragOffset = 0.0;
++  bool _isDragging = false;
+ 
+   bool get _supportsAndroidAlarm => !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+ 
+@@ -242,6 +250,37 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
+     setState(() => _isInitialLoading = false);
+   }
+ 
++  void _openWebMode(String url) {
++    setState(() {
++      _currentWebUrl = url;
++      _isWebMode = true;
++      _dragOffset = 0.0;
++    });
++  }
++
++  void _closeWebMode() {
++    setState(() {
++      _isWebMode = false;
++      _dragOffset = 0.0;
++      _isDragging = false;
++    });
++  }
++
++  Future<bool> _handlePop() async {
++    if (_isWebMode) {
++      if (_webViewController != null && await _webViewController!.canGoBack()) {
++        _webViewController!.goBack();
++        return false;
++      } else {
++        _closeWebMode();
++        return false;
++      }
++    }
++    return true;
++  }
++
++
++
+   Future<void> _initializePlayer() async {
+     _audioPlayer.setVolume(_volume);
+     _audioPlayer.playerStateStream.listen((state) {
+@@ -679,8 +718,25 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
+                           const Divider(),
+                           ListTile(
+                               leading: Icon(Icons.language, color: iconColor),
+-                              title: Text("Site e Reprise", style: TextStyle(color: textColor)),
+-                              onTap: () => _launchURL("https://igrejaprimitivadoutrinadivina.com/")),
++                              title: Text("Website", style: TextStyle(color: textColor)),
++                              onTap: () {
++                                Navigator.pop(context);
++                                _openWebMode("https://www.igrejaprimitivadoutrinadivina.com/");
++                              }),
++                          ListTile(
++                              leading: Icon(Icons.audio_file, color: iconColor),
++                              title: Text("Reprises - Audios", style: TextStyle(color: textColor)),
++                              onTap: () {
++                                Navigator.pop(context);
++                                _openWebMode("https://igrejaprimitivadoutrinadivina.com/internas/audios");
++                              }),
++                          ListTile(
++                              leading: Icon(Icons.contact_mail, color: iconColor),
++                              title: Text("Contato", style: TextStyle(color: textColor)),
++                              onTap: () {
++                                Navigator.pop(context);
++                                _openWebMode("https://www.igrejaprimitivadoutrinadivina.com/contato");
++                              }),
+                           ListTile(
+                               leading: Icon(Icons.notes, color: iconColor),
+                               title: Text("Pedidos de Oração", style: TextStyle(color: textColor)),
+@@ -930,7 +986,7 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
+                                                   : Icon(_audioPlayer.playerState.playing ? Icons.stop : Icons.play_arrow, color: playIconColor, size: 50))),
+                                       const SizedBox(height: 40),
+                                       GestureDetector(
+-                                          onTap: () { _scaffoldKey.currentState?.openDrawer(); },
++                                          onTap: () => _openWebMode("https://www.igrejaprimitivadoutrinadivina.com/"),
+                                           child: Column(children: [
+                                             Container(
+                                                 width: 70,
+@@ -1140,44 +1196,204 @@ class _RadioHomeState extends State<RadioHome> with WidgetsBindingObserver {
+                     ElevatedButton(onPressed: _initializePlayer, child: const Text('Reintentar'))
+                   ]))));
+ 
+-    return Scaffold(
+-      key: _scaffoldKey,
+-      resizeToAvoidBottomInset: false,
+-      drawer: MediaQuery.of(context).orientation == Orientation.landscape ? null : _buildDrawer(context),
+-      backgroundColor: Colors.transparent,
+-      body: Stack(
+-        children: [
+-          Container(
+-            decoration: BoxDecoration(
+-              gradient: LinearGradient(
+-                colors: _isDarkMode
+-                    ? [const Color.fromARGB(255, 0, 55, 219).withOpacity(0.9), baseBgColor]
+-                    : [const Color(0xFF80DEEA), baseBgColor],
+-                begin: _isDarkMode ? Alignment.topCenter : Alignment.topLeft,
+-                end: _isDarkMode ? Alignment.bottomCenter : Alignment.bottomRight,
+-                stops: _isDarkMode ? const [0.0, 0.4] : const [0.0, 0.9],
++    return PopScope(
++      canPop: !_isWebMode,
++      onPopInvokedWithResult: (bool didPop, dynamic result) async {
++        if (didPop) return;
++        final shouldPop = await _handlePop();
++        if (shouldPop && mounted) {
++          SystemNavigator.pop();
++        }
++      },
++      child: Scaffold(
++        key: _scaffoldKey,
++        resizeToAvoidBottomInset: false,
++        drawer: MediaQuery.of(context).orientation == Orientation.landscape ? null : _buildDrawer(context),
++        backgroundColor: Colors.transparent,
++        body: Stack(
++          children: [
++            Container(
++              decoration: BoxDecoration(
++                gradient: LinearGradient(
++                  colors: _isDarkMode
++                      ? [const Color.fromARGB(255, 0, 55, 219).withOpacity(0.9), baseBgColor]
++                      : [const Color(0xFF80DEEA), baseBgColor],
++                  begin: _isDarkMode ? Alignment.topCenter : Alignment.topLeft,
++                  end: _isDarkMode ? Alignment.bottomCenter : Alignment.bottomRight,
++                  stops: _isDarkMode ? const [0.0, 0.4] : const [0.0, 0.9],
++                ),
+               ),
+             ),
+-          ),
+-          Positioned(
+-              top: 30,
+-              left: 0,
+-              right: 0,
+-              child: Opacity(opacity: _isDarkMode ? 0.3 : 0.6, child: Image.asset('assets/NUBE.webp', height: 280, fit: BoxFit.cover))),
+-          SafeArea(
+-            child: MediaQuery.of(context).orientation == Orientation.landscape
+-                ? Row(
++            Positioned(
++                top: 30,
++                left: 0,
++                right: 0,
++                child: Opacity(opacity: _isDarkMode ? 0.3 : 0.6, child: Image.asset('assets/NUBE.webp', height: 280, fit: BoxFit.cover))),
++            SafeArea(
++              child: LayoutBuilder(
++                builder: (context, constraints) {
++                  final double screenHeight = constraints.maxHeight;
++                  final double miniPlayerHeight = 85.0;
++                  final double bottomPanelHeightInWeb = miniPlayerHeight + _dragOffset;
++
++                  return Stack(
+                     children: [
+-                      Expanded(flex: 4, child: SingleChildScrollView(child: _buildTopContainer(context, textColor))),
+-                      Expanded(flex: 3, child: _buildLandscapeRight(context, baseBgColor, headerBgColor, textColor, playIconColor, neumorphicShadows))
+-                    ],
+-                  )
+-                : Column(
+-                    children: [
+-                      _buildTopContainer(context, textColor),
+-                      Expanded(child: _buildPortraitBottom(context, baseBgColor, headerBgColor, textColor, playIconColor, websiteIconColor, neumorphicShadows, isDrawerOpen)),
++                      // White Top Card (WebView or Clock)
++                      AnimatedPositioned(
++                        duration: const Duration(milliseconds: 500),
++                        curve: Curves.easeInOutQuart,
++                        top: 0,
++                        left: 0,
++                        right: 0,
++                        height: _isWebMode ? (screenHeight - bottomPanelHeightInWeb) : (screenHeight * 0.45),
++                        child: AnimatedContainer(
++                          duration: const Duration(milliseconds: 500),
++                          curve: Curves.easeInOutQuart,
++                          margin: _isWebMode ? EdgeInsets.zero : const EdgeInsets.all(16.0),
++                          decoration: BoxDecoration(
++                            color: _isDarkMode ? Colors.black : Colors.white,
++                            borderRadius: BorderRadius.circular(_isWebMode ? 0 : 40.0),
++                          ),
++                          child: _isWebMode ? _buildWebView() : _buildTopContainer(context, textColor),
++                        ),
++                      ),
++
++                      // Celeste Bottom Card (Player or MiniPlayer)
++                      AnimatedPositioned(
++                        duration: const Duration(milliseconds: 500),
++                        curve: Curves.easeInOutQuart,
++                        bottom: _isWebMode ? 0 : 16,
++                        left: _isWebMode ? 0 : 16,
++                        right: _isWebMode ? 0 : 16,
++                        height: _isWebMode ? bottomPanelHeightInWeb : (screenHeight * 0.52),
++                        child: GestureDetector(
++                          onVerticalDragUpdate: _isWebMode ? (details) {
++                            setState(() {
++                              _dragOffset = (_dragOffset + details.delta.dy).clamp(0.0, 300.0);
++                              _isDragging = _dragOffset > 10;
++                            });
++                          } : null,
++                          onVerticalDragEnd: _isWebMode ? (details) {
++                             if (_dragOffset > 100 || details.primaryVelocity! > 500) {
++                               _closeWebMode();
++                             } else {
++                               setState(() {
++                                 _dragOffset = 0.0;
++                                 _isDragging = false;
++                               });
++                             }
++                          } : null,
++                          child: AnimatedContainer(
++                            duration: const Duration(milliseconds: 500),
++                            curve: Curves.easeInOutQuart,
++                            decoration: BoxDecoration(
++                              color: _isDarkMode ? Colors.blue.withOpacity(0.15) : const Color(0xFFB2EBF2).withOpacity(0.9),
++                              borderRadius: BorderRadius.circular(_isWebMode && !_isDragging ? 0 : 40.0),
++                            ),
++                            child: _isWebMode 
++                               ? _buildMiniPlayer(context, textColor, playIconColor) 
++                               : _buildPortraitBottom(context, baseBgColor, headerBgColor, textColor, playIconColor, websiteIconColor, neumorphicShadows, isDrawerOpen),
++                          ),
++                        ),
++                      ),
+                     ],
+-                  ),
++                  );
++                },
++              ),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++
++  Widget _buildWebView() {
++    return Column(
++      children: [
++        if (_isWebMode)
++          Container(
++            height: 4,
++            width: 40,
++            margin: const EdgeInsets.symmetric(vertical: 8),
++            decoration: BoxDecoration(
++              color: Colors.grey.withOpacity(0.5),
++              borderRadius: BorderRadius.circular(2),
++            ),
++          ),
++        Expanded(
++          child: InAppWebView(
++            initialUrlRequest: URLRequest(url: WebUri(_currentWebUrl)),
++            initialSettings: InAppWebViewSettings(
++              javaScriptEnabled: true,
++              useShouldOverrideUrlLoading: true,
++              verticalScrollBarEnabled: !_isDragging,
++              disableVerticalScroll: _isDragging,
++            ),
++            onWebViewCreated: (controller) => _webViewController = controller,
++            shouldOverrideUrlLoading: (controller, navigationAction) async {
++              final uri = navigationAction.request.url;
++              if (uri != null && uri.scheme != "http" && uri.scheme != "https") {
++                await launchUrl(Uri.parse(uri.toString()), mode: LaunchMode.externalApplication);
++                return NavigationActionPolicy.CANCEL;
++              }
++              return NavigationActionPolicy.ALLOW;
++            },
++            onLoadStop: (controller, url) async {
++              // Hide Web Player and unnecessary elements
++              await controller.evaluateJavascript(source: """
++                (function() {
++                  var style = document.createElement('style');
++                  style.innerHTML = `
++                    .player, #player, .maxcast-player, .maxcast-player-wrapper, 
++                    #maxcast-bar, iframe[src*="maxcast"], audio, video, 
++                    .repro-bottom, div[class*="player"] { 
++                      display: none !important; 
++                    }
++                  `;
++                  document.head.appendChild(style);
++                })();
++              """);
++            },
++          ),
++        ),
++      ],
++    );
++  }
++
++  Widget _buildMiniPlayer(BuildContext context, Color textColor, Color playIconColor) {
++    return Padding(
++      padding: const EdgeInsets.symmetric(horizontal: 20.0),
++      child: Row(
++        children: [
++          ClipRRect(
++            borderRadius: BorderRadius.circular(8.0),
++            child: Image.asset('assets/iconolavoz.webp', width: 45, height: 45, fit: BoxFit.cover),
++          ),
++          const SizedBox(width: 12),
++          Expanded(
++            child: Column(
++              mainAxisAlignment: MainAxisAlignment.center,
++              crossAxisAlignment: CrossAxisAlignment.start,
++              children: [
++                Text("A Voz da Cura Divina", style: TextStyle(color: textColor, fontWeight: FontWeight.bold, fontSize: 13), overflow: TextOverflow.ellipsis),
++                Row(
++                  children: [
++                    Text("AO VIVO", style: TextStyle(color: Colors.red.shade700, fontWeight: FontWeight.bold, fontSize: 10)),
++                    const SizedBox(width: 8),
++                    Icon(Icons.volume_up, size: 12, color: textColor.withOpacity(0.5)),
++                    Text(" ${(_volume * 100).toInt()}%", style: TextStyle(color: textColor.withOpacity(0.5), fontSize: 10)),
++                  ],
++                ),
++              ],
++            ),
++          ),
++          IconButton(
++            icon: Icon(_audioPlayer.playerState.playing ? Icons.stop : Icons.play_arrow, color: playIconColor, size: 32),
++            onPressed: _playOrStopStream,
++          ),
++          IconButton(
++            icon: Icon(Icons.close, color: textColor.withOpacity(0.6), size: 24),
++            onPressed: _closeWebMode,
+           ),
+         ],
+       ),

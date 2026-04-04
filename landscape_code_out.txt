@@ -1,0 +1,133 @@
+Widget _buildLandscapeRight(BuildContext context, Color baseBgColor, Color headerBgColor, Color textColor, Color playIconColor, List<BoxShadow> neumorphicShadows) {
+    return Stack(
+        children: [
+          Align(
+            alignment: Alignment.center,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                GestureDetector(
+                    onTap: _playOrStopStream,
+                    child: Container(
+                        width: 140,
+                        height: 140,
+                        decoration: BoxDecoration(
+                            gradient: !_isDarkMode && _audioPlayer.playerState.playing
+                                ? LinearGradient(colors: [baseBgColor, headerBgColor], begin: Alignment.topLeft, end: Alignment.bottomRight)
+                                : null,
+                            color: _isDarkMode ? baseBgColor : (_audioPlayer.playerState.playing ? null : baseBgColor),
+                            shape: BoxShape.circle,
+                            border: _isDarkMode ? Border.all(color: Colors.grey.shade700, width: 1) : null,
+                            boxShadow: neumorphicShadows),
+                        child: _isConnecting
+                            ? LoadingAnimationWidget.inkDrop(color: playIconColor, size: 45.0)
+                            : Icon(_audioPlayer.playerState.playing ? Icons.stop : Icons.play_arrow, color: playIconColor, size: 70))),
+                const SizedBox(height: 30),
+                Container(
+                  width: 250,
+                  decoration: BoxDecoration(
+                    color: _isDarkMode ? Colors.black26 : Colors.white60,
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: (_isDarkMode ? Colors.white : Colors.black).withOpacity(0.05)),
+                    boxShadow: neumorphicShadows
+                  ),
+                  child: SliderTheme(
+                    data: SliderTheme.of(context).copyWith(
+                      trackHeight: 8,
+                      thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 12),
+                      overlayShape: const RoundSliderOverlayShape(overlayRadius: 24),
+                    ),
+                    child: Slider(
+                      value: _volume,
+                      min: 0.0,
+                      max: 1.0,
+                      activeColor: Colors.blue.shade700,
+                      inactiveColor: textColor.withOpacity(0.2),
+                      onChanged: (val) {
+                        setState(() => _volume = val);
+                        _audioPlayer.setVolume(val);
+                      },
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(top: 10),
+                  child: Text('${(_volume * 100).toInt()}%', style: TextStyle(color: textColor.withOpacity(0.8), fontWeight: FontWeight.bold, fontSize: 16)),
+                )
+              ],
+            ),
+          ),
+          SafeArea(
+            child: Align(
+              alignment: Alignment.bottomCenter,
+              child: GestureDetector(
+                onVerticalDragEnd: (d) { if (d.primaryVelocity! < 0) _showLandscapeMenu(baseBgColor, textColor); },
+                onTap: () => _showLandscapeMenu(baseBgColor, textColor),
+                child: Container(
+                  width: 120,
+                  height: 35,
+                  margin: const EdgeInsets.only(bottom: 5),
+                  decoration: BoxDecoration(
+                    color: _isDarkMode ? Colors.white10 : Colors.black12,
+                    borderRadius: const BorderRadius.vertical(top: Radius.circular(15), bottom: Radius.circular(5))
+                  ),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Container(width: 40, height: 4, decoration: BoxDecoration(color: textColor.withOpacity(0.5), borderRadius: BorderRadius.circular(2))),
+                      const SizedBox(height: 4),
+                      Text("MEN├Ü", style: TextStyle(color: textColor.withOpacity(0.8), fontSize: 12, fontWeight: FontWeight.bold)),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          )
+        ],
+      );
+  }
+
+  void _showLandscapeMenu(Color baseBgColor, Color textColor) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (BuildContext context) {
+        return Container(
+          height: MediaQuery.of(context).size.height * 0.85,
+          decoration: BoxDecoration(
+            color: baseBgColor,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(25))
+          ),
+          child: Column(
+            children: [
+              const SizedBox(height: 10),
+              Container(width: 50, height: 6, decoration: BoxDecoration(color: textColor.withOpacity(0.3), borderRadius: BorderRadius.circular(3))),
+              const SizedBox(height: 20),
+              Text("MEN├Ü PRINCIPAL", style: GoogleFonts.bebasNeue(fontSize: 32, color: textColor)),
+              const SizedBox(height: 20),
+              Expanded(
+                child: GridView.count(
+                  crossAxisCount: 3,
+                  mainAxisSpacing: 15,
+                  crossAxisSpacing: 15,
+                  childAspectRatio: 1.2,
+                  padding: const EdgeInsets.all(20),
+                  children: [
+                    _buildLandscapeGridItem(Icons.timer, "Temporizador", _showTimerAndAlarmDialog, textColor),
+                    _buildLandscapeGridItem(Icons.alarm, "Alarme", _showTimerAndAlarmDialog, textColor),
+                    _buildLandscapeGridItem(Icons.language, "Site", () { }, textColor),
+                    _buildLandscapeGridItem(Icons.replay, "Reprise", _showTimerAndAlarmDialog, textColor),
+                    _buildLandscapeGridItem(Icons.share, "Compartilhar", () { }, textColor),
+                    _buildLandscapeGridItem(Icons.exit_to_app, "Sair", () => SystemNavigator.pop(), textColor),
+                  ],
+                ),
+              )
+            ]
+          )
+        );
+      }
+    );
+  }
+
+  

@@ -22,6 +22,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sleek_circular_slider/sleek_circular_slider.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_remote_config/firebase_remote_config.dart';
+import 'package:firebase_analytics/firebase_analytics.dart';
+import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'firebase_options.dart';
 import 'banner_avisos.dart';
 import 'versiculos_promesas.dart';
@@ -30,6 +32,8 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/data/latest_all.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
+import 'app_strings.dart';
+import 'dart:io';
 
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
     FlutterLocalNotificationsPlugin();
@@ -61,7 +65,7 @@ void playRadio() async {
       id: streamUrl,
       title: 'A Voz da Cura Divina - Alarma',
       artist: 'Radio ao vivo',
-      artUri: Uri.parse('https://i.ibb.co/XZKxHq3x/LOGOFONDOBARAPPok.jpg'),
+      artUri: Uri.parse('https://i.ibb.co/nMT6qsRN/ipddceu.jpg'),
     );
     await audioPlayer
         .setAudioSource(AudioSource.uri(Uri.parse(streamUrl), tag: mediaItem));
@@ -96,11 +100,24 @@ Future<String> _loadStreamUrl() async {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
   IsolateNameServer.registerPortWithName(
       alarmReceivePort.sendPort, 'alarm_port');
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
+  await FirebaseAnalytics.instance.setAnalyticsCollectionEnabled(true);
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setString('app_lang', Platform.localeName);
+  
+  // Captura errores de Flutter
+  FlutterError.onError = FirebaseCrashlytics.instance.recordFlutterFatalError;
+
+  // Captura errores de Dart fuera de Flutter
+  PlatformDispatcher.instance.onError = (error, stack) {
+    FirebaseCrashlytics.instance.recordError(error, stack, fatal: true);
+    return true;
+  };
 
   // Background message handler
   FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
@@ -168,15 +185,28 @@ void main() async {
         androidNotificationChannelId:
             'com.kym.lavozdelacuradivina.radio.channel.audio',
         androidNotificationChannelName: 'Radio A Voz da Cura Divina',
-        androidNotificationOngoing: true,
         notificationColor: const Color(0xFF80DEEA),
         androidNotificationIcon: 'drawable/ic_stat_igual1',
+        androidStopForegroundOnPause: false, // ← servicio siempre en primer plano
       );
     }
     final session = await AudioSession.instance;
-    await session.configure(const AudioSessionConfiguration.music());
+    await session.configure(AudioSessionConfiguration(
+      avAudioSessionCategory: AVAudioSessionCategory.playback,
+      avAudioSessionMode: AVAudioSessionMode.defaultMode,
+      avAudioSessionCategoryOptions: AVAudioSessionCategoryOptions.allowBluetooth,
+      androidAudioAttributes: const AndroidAudioAttributes(
+        contentType: AndroidAudioContentType.music,
+        usage: AndroidAudioUsage.media,
+        flags: AndroidAudioFlags.none,
+      ),
+      androidAudioFocusGainType: AndroidAudioFocusGainType.gain,
+      androidWillPauseWhenDucked: false,    // ← vos manejás el volumen manualmente
+    ));
   } catch (e) {
-    debugPrint('Error inicializando plugins de audio: $e');
+    // Re-lanzar: si JustAudioBackground falla, la app no puede funcionar
+    debugPrint('Error CRÍTICO inicializando plugins de audio: $e');
+    rethrow; // ← para que Firebase Crashlytics lo capture como fatal y no continúe silenciosamente
   }
 
   final streamUrl = await _loadStreamUrl();
@@ -192,7 +222,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'A Voz da Cura Divina',
+      title: t('notifAlarmTitle'),
       debugShowCheckedModeBanner: false,
       theme: ThemeData(brightness: Brightness.light),
       darkTheme: ThemeData(brightness: Brightness.dark),
@@ -215,7 +245,17 @@ class RadioHome extends StatefulWidget {
 class _RadioHomeState extends State<RadioHome>
     with WidgetsBindingObserver, TickerProviderStateMixin {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
-  final AudioPlayer _audioPlayer = AudioPlayer();
+  AudioPlayer _audioPlayer = AudioPlayer(
+    audioLoadConfiguration: AudioLoadConfiguration(
+      androidLoadControl: AndroidLoadControl(
+        minBufferDuration: const Duration(seconds: 3),
+        maxBufferDuration: const Duration(seconds: 8),
+        bufferForPlaybackDuration: const Duration(seconds: 2),
+        bufferForPlaybackAfterRebufferDuration: const Duration(seconds: 3),
+        prioritizeTimeOverSizeThresholds: true,
+      ),
+    ),
+  );
   bool _isDarkMode = false;
   bool _isInitialLoading = true;
   String _errorMessage = '';
@@ -232,6 +272,22 @@ class _RadioHomeState extends State<RadioHome>
   static const String chavePix = "TU_CLAVE_AQUI";
   bool _isNavigating = false;
   List<int> _alarmDays = [];
+  Timer? _bufferingWatchdog;
+  DateTime? _bufferingStartedAt;
+  bool _wasPlayingBeforeInterruption = false;
+  bool _stoppedByHeadphones = false;
+  StreamSubscription? _interruptionStreamSubscription;
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
+  bool _isRestarting = false;
+  bool _shouldResumeWhenNetworkReturns = false;
+  DateTime? _lastReconnectAttemptAt;
+  Timer? _interruptionFallbackTimer;        // Para timbradas sin fin de interrupción
+  DateTime? _interruptionBeganAt;           // Momento en que comenzó la interrupción
+  bool _pendingReconnectAfterInterruption = false; // Reconexión diferida al foreground
+  bool _wasManuallyPaused = false;
+  DateTime? _lastResumeAttemptAt;
+  bool _isInBackground = false;
+  bool _interruptionActive = false; // true mientras dure una llamada/timbrada
 
   // Web View State
   bool _isWebMode = false;
@@ -281,6 +337,9 @@ class _RadioHomeState extends State<RadioHome>
         await _playOrStopStream();
       }
     });
+
+    _setupConnectivityListener();
+    _setupAudioSessionListeners();
   }
 
   Future<void> _loadPreferencesAndInitialize() async {
@@ -334,43 +393,7 @@ class _RadioHomeState extends State<RadioHome>
 
   Future<void> _initializePlayer() async {
     _audioPlayer.setVolume(_volume);
-
-    // Escuchar metadatos de la radio (ICY) para el Marquee del miniplayer
-    _audioPlayer.icyMetadataStream.listen((metadata) {
-      if (metadata != null && metadata.info != null) {
-        final title = metadata.info?.title ?? '';
-        if (title.isNotEmpty && mounted) {
-          setState(() {
-            _marqueeText = title;
-          });
-        }
-      }
-    });
-
-    _audioPlayer.playerStateStream.listen((state) {
-      if (mounted) setState(() {});
-      if (state.playing && _errorMessage.isNotEmpty) {
-        if (mounted) setState(() => _errorMessage = '');
-      }
-      // 1. Control determinista del Spinner basado en el estado interno
-      if (state.playing &&
-          (state.processingState == ProcessingState.loading ||
-              state.processingState == ProcessingState.buffering)) {
-        if (!_isConnecting && mounted) setState(() => _isConnecting = true);
-      } else {
-        if (_isConnecting && mounted) setState(() => _isConnecting = false);
-      }
-
-      // Intercept Pause -> stop() limpio. Cierra conexión y notificación.
-      if (!state.playing &&
-          state.processingState != ProcessingState.idle &&
-          state.processingState != ProcessingState.completed) {
-        _audioPlayer.stop();
-      }
-    });
-    _audioPlayer.processingStateStream.listen((state) {
-      if (state == ProcessingState.completed) _restartStream();
-    });
+    _setupPlayerStateStream();
     try {
       await _initializeAudio();
     } catch (e) {
@@ -384,10 +407,145 @@ class _RadioHomeState extends State<RadioHome>
     }
   }
 
+  void _setupPlayerStateStream() {
+    // Escuchar metadatos de la radio (ICY) para el Marquee del miniplayer
+    _audioPlayer.icyMetadataStream.listen((metadata) {
+      if (metadata != null && metadata.info != null) {
+        final title = metadata.info?.title ?? '';
+        if (title.isNotEmpty && mounted) {
+          setState(() {
+            _marqueeText = title;
+          });
+        }
+      }
+    });
+
+    _audioPlayer.playerStateStream.listen((state) async {
+      if (mounted) {
+        setState(() {
+          if (state.playing && _errorMessage.isNotEmpty) _errorMessage = '';
+        });
+      }
+
+      // Spinner: mostrar solo cuando está cargando/buffering Y jugando
+      if (state.playing &&
+          (state.processingState == ProcessingState.loading ||
+           state.processingState == ProcessingState.buffering)) {
+        if (!_isConnecting && mounted) setState(() => _isConnecting = true);
+
+        if (state.processingState == ProcessingState.buffering) {
+          _bufferingStartedAt ??= DateTime.now();
+          _bufferingWatchdog ??= Timer(const Duration(seconds: 12), () {
+            if (mounted &&
+                _audioPlayer.playerState.playing &&
+                _audioPlayer.processingState == ProcessingState.buffering &&
+                _bufferingStartedAt != null &&
+                DateTime.now().difference(_bufferingStartedAt!) >=
+                    const Duration(seconds: 12)) {
+              // Si estamos en background, no intentar reconectar — causará
+              // ForegroundServiceStartNotAllowedException y loop infinito.
+              // El lifecycle.resumed lo manejará al volver a primer plano.
+              if (_isInBackground) {
+                debugPrint('[Watchdog] En background → esperando primer plano');
+                _wasPlayingBeforeInterruption = true;
+                _pendingReconnectAfterInterruption = true;
+              } else {
+                debugPrint('[Watchdog] Forzando reconexión...');
+                _shouldResumeWhenNetworkReturns = true;
+                _restartStream(force: true).then((_) => _audioPlayer.play());
+              }
+              _bufferingWatchdog?.cancel();
+              _bufferingWatchdog = null;
+              _bufferingStartedAt = null;
+            }
+          });
+        }
+      } else {
+        if (_isConnecting && mounted) setState(() => _isConnecting = false);
+        _bufferingStartedAt = null;
+        _bufferingWatchdog?.cancel();
+        _bufferingWatchdog = null;
+      }
+
+      // Pausa manual desde notificación: solo marcamos la pausa para reconectar después
+      if (!state.playing &&
+          state.processingState == ProcessingState.ready &&
+          !_isRestarting &&
+          !_interruptionActive &&
+          !_wasPlayingBeforeInterruption &&
+          !_pendingReconnectAfterInterruption) {
+        _wasManuallyPaused = true;
+        debugPrint('[Player] Pausa manual detectada – marcar para reconexión fresca');
+        // No llamamos a stop() ni mutamos el volumen; la notificación sigue activa.
+      }
+
+      // Play detectado después de pausa manual (desde notificación O botón):
+      // el player arrancó con audio viejo → reconectar inmediatamente al live-edge
+      // Play detectado después de pausa manual (desde notificación o botón):
+      // Reconectamos al live‑edge creando una nueva fuente y reproduciendo.
+      if (_wasManuallyPaused && state.playing && !_isRestarting && !_interruptionActive) {
+        _wasManuallyPaused = false;
+        debugPrint('[Player] Play post‑pausa → reconexión fresca');
+        _isRestarting = true;
+        _interruptionActive = true;
+        try {
+          await _initializeAudio(); // crea URL con timestamp nuevo
+          if (mounted) {
+            await _audioPlayer.play();
+            _shouldResumeWhenNetworkReturns = true;
+          }
+        } catch (e) {
+          debugPrint('[Player] Error reconexión post‑pausa: $e');
+        } finally {
+          _isRestarting = false;
+          _interruptionActive = false;
+        }
+      }
+
+      // Si se hizo stop real, limpiar la bandera (solo si no es operación interna)
+      if (state.processingState == ProcessingState.idle &&
+          !_interruptionActive &&
+          !_isRestarting) {
+        _wasManuallyPaused = false;
+      }
+    });
+
+    _audioPlayer.processingStateStream.listen((state) {
+      if (state == ProcessingState.completed) _restartStream();
+    });
+  }
+
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _isInBackground = false;
+      _stoppedByHeadphones = false;
+      debugPrint('[Lifecycle] App en primer plano');
+
+      if (_pendingReconnectAfterInterruption && mounted) {
+        // Pequeño delay para que Android libere el foco de audio post-llamada
+        Future.delayed(const Duration(milliseconds: 800), () {
+          if (mounted && _pendingReconnectAfterInterruption) {
+            _doReconnectAfterInterruption(fromLifecycle: true);
+          }
+        });
+      }
+    }
+
+    if (state == AppLifecycleState.paused) {
+      _isInBackground = true;
+    }
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _interruptionStreamSubscription?.cancel();
+    _connectivitySubscription?.cancel();
+    _bufferingWatchdog?.cancel();
     _equalizerController.dispose();
+    _interruptionFallbackTimer?.cancel();
     _audioPlayer.dispose();
     _volumeIndicatorTimer?.cancel();
     _sleepTimer?.cancel();
@@ -395,19 +553,82 @@ class _RadioHomeState extends State<RadioHome>
     super.dispose();
   }
 
+  void _setupConnectivityListener() {
+    _connectivitySubscription?.cancel();
+
+    _connectivitySubscription =
+        Connectivity().onConnectivityChanged.listen((results) async {
+      final hasNetwork = !results.contains(ConnectivityResult.none);
+
+      debugPrint('[Connectivity] changed -> $results');
+
+      if (!hasNetwork) {
+        if (_audioPlayer.playing || _isConnecting) {
+          debugPrint('[Connectivity] Sin red -> marcar reanudación pendiente');
+          _shouldResumeWhenNetworkReturns = true;
+        }
+        return;
+      }
+
+      if (!_shouldResumeWhenNetworkReturns) return;
+      if (!mounted || _isRestarting) return;
+
+      final now = DateTime.now();
+      if (_lastReconnectAttemptAt != null &&
+          now.difference(_lastReconnectAttemptAt!) <
+              const Duration(seconds: 3)) {
+        return;
+      }
+      _lastReconnectAttemptAt = now;
+
+      debugPrint('[Connectivity] Red restaurada -> reconectando stream');
+      _shouldResumeWhenNetworkReturns = false;
+
+      if (mounted) {
+        setState(() {
+          _isConnecting = true;
+          _errorMessage = '';
+        });
+      }
+
+      try {
+        _isRestarting = true;
+        await _audioPlayer.pause(); 
+        await _initializeAudio();
+        if (mounted) await _audioPlayer.play();  // seguro siempre
+      } catch (e) {
+        debugPrint('[Connectivity] Error al reconectar: $e');
+        _shouldResumeWhenNetworkReturns = true;
+        if (mounted) {
+          setState(() {
+            _errorMessage = t('errorPlayback');
+          });
+        }
+      } finally {
+        _isRestarting = false;
+      }
+    });
+  }
+
   Future<void> _initializeAudio() async {
     if (!mounted) return;
     setState(() => _errorMessage = '');
     try {
+      // Cache‑busting: añadir timestamp para evitar buffer reciclado
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final urlWithTimestamp = widget.streamUrl.contains('?')
+          ? '${widget.streamUrl}&_=$timestamp'
+          : '${widget.streamUrl}?_=$timestamp';
+
       final mediaItem = MediaItem(
-        id: widget.streamUrl, // CAMBIAR
-        title: 'A Voz da Cura Divina',
+        id: urlWithTimestamp,
+        title: t('notifAlarmTitle'),
         artist: 'Radio ao vivo',
-        artUri: Uri.parse('https://i.ibb.co/XZKxHq3x/LOGOFONDOBARAPPok.jpg'),
+        artUri: Uri.parse('https://i.ibb.co/nMT6qsRN/ipddceu.jpg'),
       );
       await _audioPlayer.setAudioSource(
-          AudioSource.uri(Uri.parse(widget.streamUrl),
-              tag: mediaItem), // CAMBIAR
+          AudioSource.uri(Uri.parse(urlWithTimestamp),
+              tag: mediaItem),
           preload: false);
     } catch (e) {
       final errorStr = e.toString();
@@ -421,41 +642,332 @@ class _RadioHomeState extends State<RadioHome>
     }
   }
 
-  Future<void> _restartStream() async {
-    if (_isConnecting) return;
+  Future<void> _restartStream({bool force = false}) async {
+    if (!force && _isConnecting) return;
     try {
-      await _audioPlayer.stop();
+      _bufferingWatchdog?.cancel();
+      _bufferingWatchdog = null;
+      _bufferingStartedAt = null;
+
+      await _audioPlayer.pause();
       await _initializeAudio();
     } catch (e) {
       debugPrint("Error al reiniciar el stream: $e");
     }
   }
 
+  /// Resetea forzosamente todo el estado cuando el player queda en un estado
+  /// inválido (LateInitializationError, _isRestarting=true atascado, etc.)
+  Future<void> _resetPlayerState() async {
+    debugPrint('[Reset] Reseteando estado del player...');
+    _isRestarting = false;
+    _isConnecting = false;
+    _wasPlayingBeforeInterruption = false;
+    _pendingReconnectAfterInterruption = false;
+    _interruptionFallbackTimer?.cancel();
+    _interruptionFallbackTimer = null;
+    _bufferingWatchdog?.cancel();
+    _bufferingWatchdog = null;
+    _bufferingStartedAt = null;
+    _lastResumeAttemptAt = null;
+
+    try {
+      // Dispose y recrear el player — única forma de limpiar el _audioHandler
+      await _audioPlayer.dispose();
+    } catch (_) {}
+
+    // Recrear el player desde cero con la configuración de carga optimizada
+    _audioPlayer = AudioPlayer(
+      audioLoadConfiguration: AudioLoadConfiguration(
+        androidLoadControl: AndroidLoadControl(
+          minBufferDuration: const Duration(seconds: 3),
+          maxBufferDuration: const Duration(seconds: 8),
+          bufferForPlaybackDuration: const Duration(seconds: 2),
+          bufferForPlaybackAfterRebufferDuration: const Duration(seconds: 3),
+          prioritizeTimeOverSizeThresholds: true,
+        ),
+      ),
+    );
+
+    // Reconfigurar streams del nuevo player
+    _setupPlayerStateStream();
+
+    // Reinicializar audio
+    await _initializeAudio();
+    debugPrint('[Reset] Player recreado exitosamente');
+  }
+
   Future<void> _playOrStopStream() async {
-    final connectivityResult = await Connectivity().checkConnectivity();
-    if (connectivityResult.contains(ConnectivityResult.none)) {
-      if (mounted)
-        setState(() => _errorMessage =
-            'No hay conexión a Internet. Por favor, verifica tu conexión.');
-      return;
-    }
-    setState(() => _errorMessage = '');
-    if (_audioPlayer.playerState.playing) {
-      await _audioPlayer.stop();
-    } else {
-      try {
-        if (_audioPlayer.processingState == ProcessingState.idle) {
-          await _initializeAudio();
-        }
-        await _audioPlayer.play();
-      } catch (e) {
-        if (mounted) {
-          setState(() {
-            _errorMessage = 'Error al intentar reproducir.';
-          });
+    // Si el usuario quiere PARAR y hay una operación en curso → cancelarla siempre
+    final playerIsActive = _audioPlayer.playerState.playing ||
+        _audioPlayer.processingState == ProcessingState.loading ||
+        _audioPlayer.processingState == ProcessingState.buffering;
+    if (_isRestarting) {
+      if (playerIsActive) {
+        // El usuario quiere parar: cancelar cualquier reconexión en curso
+        debugPrint('[PlayStop] Stop forzado — cancelando reconexión en curso');
+        _isRestarting = false;
+        // Caer al bloque STOP más abajo
+      } else {
+        final atascado = _lastResumeAttemptAt != null &&
+            DateTime.now().difference(_lastResumeAttemptAt!) >
+                const Duration(seconds: 15);
+        if (atascado) {
+          debugPrint('[PlayStop] _isRestarting atascado → forzando reset');
+          await _resetPlayerState();
+        } else {
+          debugPrint('[PlayStop] Ya reiniciando, ignorando llamada duplicada');
+          return;
         }
       }
     }
+
+    // Registrar timestamp para detectar atascos futuros
+    _lastResumeAttemptAt = DateTime.now();
+
+    final connectivityResult = await Connectivity().checkConnectivity();
+    if (connectivityResult.contains(ConnectivityResult.none)) {
+      _shouldResumeWhenNetworkReturns = true;
+      if (mounted) setState(() => _errorMessage = t('errorNoInternet'));
+      return;
+    }
+
+    if (mounted) setState(() => _errorMessage = '');
+
+    if (_audioPlayer.playerState.playing ||
+        _audioPlayer.processingState == ProcessingState.loading ||
+        _audioPlayer.processingState == ProcessingState.buffering) {
+      // ── STOP real (botón del usuario)
+      _shouldResumeWhenNetworkReturns = false;
+      _wasPlayingBeforeInterruption = false;
+      _bufferingWatchdog?.cancel();
+      _bufferingWatchdog = null;
+      _bufferingStartedAt = null;
+      _isRestarting = true;
+      _wasManuallyPaused = false;
+      try {
+        await _audioPlayer.stop();
+      } finally {
+        _isRestarting = false;
+      }
+    } else {
+      // ── PLAY
+      _isRestarting = true;
+      try {
+        if (mounted) setState(() { _isConnecting = true; _errorMessage = ''; });
+        _bufferingWatchdog?.cancel();
+        _bufferingWatchdog = null;
+        _bufferingStartedAt = null;
+        // Restaurar volumen por si venía muteado del pause
+        _audioPlayer.setVolume(1.0);
+        if (_wasManuallyPaused) {
+          // Pausa manual: reiniciar completamente para audio fresco
+          _wasManuallyPaused = false;
+          debugPrint('[PlayStop] Post-pausa → reinit completo para audio live');
+          await _restartStream(force: true);
+        } else {
+          // Play normal: reconexion con URL fresca
+          await _restartStream(force: true);
+        }
+        if (mounted) {
+          await _audioPlayer.play();
+          _shouldResumeWhenNetworkReturns = true;
+        }
+      } catch (e) {
+        debugPrint('[PlayStop] Error: $e');
+        // Si el error es LateInitializationError → reset completo
+        if (e.toString().contains('LateInitializationError') ||
+            e.toString().contains('_audioHandler') ||
+            e.toString().contains('single player instance')) {
+          debugPrint('[PlayStop] Error crítico → reseteo completo del player');
+          await _resetPlayerState();
+          // Reintentar una vez después del reset
+          try {
+            await _audioPlayer.play();
+            _shouldResumeWhenNetworkReturns = true;
+          } catch (e2) {
+            debugPrint('[PlayStop] Reintento fallido: $e2');
+            if (mounted) setState(() => _errorMessage = t('errorPlayback'));
+          }
+        } else {
+          _shouldResumeWhenNetworkReturns = true;
+          if (mounted) setState(() => _errorMessage = t('errorPlayback'));
+        }
+      } finally {
+        _isRestarting = false;
+      }
+    }
+  }
+
+  /// Reconecta al live-edge después de una interrupción (llamada, timbrada, etc.).
+  /// [fromLifecycle] indica si viene del evento didChangeAppLifecycleState.
+  Future<void> _doReconnectAfterInterruption({bool fromLifecycle = false}) async {
+    if (!mounted) return;
+    if (!_pendingReconnectAfterInterruption) return;
+
+    // Evitar doble-reconexión si ya hay una en curso.
+    // Excepción: si viene del lifecycle, tiene prioridad y puede override.
+    if (_isRestarting && !fromLifecycle) {
+      debugPrint('[Reconnect] Descartado — ya hay reconexión en curso');
+      return;
+    }
+
+    // Guard de duplicados solo para llamadas NO provenientes del lifecycle
+    if (!fromLifecycle) {
+      final now = DateTime.now();
+      if (_lastResumeAttemptAt != null &&
+          now.difference(_lastResumeAttemptAt!) < const Duration(seconds: 3)) {
+        debugPrint('[Reconnect] Descartado — intento duplicado reciente');
+        return;
+      }
+    }
+
+    _pendingReconnectAfterInterruption = false;
+    // _interruptionActive se limpia en finally para proteger el stop/reinit interno
+    _lastResumeAttemptAt = DateTime.now();
+    debugPrint('[Reconnect] Iniciando (bg=$_isInBackground, fromLifecycle=$fromLifecycle)');
+    _isRestarting = true;
+
+    try {
+      // Aseguramos que el player esté detenido antes de reconectar
+      if (_audioPlayer.playing ||
+          _audioPlayer.processingState == ProcessingState.loading ||
+          _audioPlayer.processingState == ProcessingState.buffering) {
+        await _audioPlayer.stop();
+      }
+
+      if (!mounted) return;
+
+      // Si hay otra interrupción activa recién llegada, abortar
+      if (_wasPlayingBeforeInterruption) {
+        debugPrint('[Reconnect] Nueva interrupción detectada → abortando');
+        _pendingReconnectAfterInterruption = true;
+        return;
+      }
+
+      // Reconectar con URL fresca (cache-busting en _initializeAudio)
+      await _initializeAudio();
+      if (mounted) {
+        await _audioPlayer.play();
+        _shouldResumeWhenNetworkReturns = true;
+        debugPrint('[Reconnect] ✓ Completado (bg=$_isInBackground)');
+      }
+    } catch (e) {
+      debugPrint('[Reconnect] Error: $e');
+      // Reintentar en el próximo foreground
+      _pendingReconnectAfterInterruption = true;
+    } finally {
+      _isRestarting = false;
+      _interruptionActive = false; // limpiar AQUÍ, tras completar stop+reinit
+    }
+  }
+
+  Future<void> _setupAudioSessionListeners() async {
+    final audioSession = await AudioSession.instance;
+
+    audioSession.becomingNoisyEventStream.listen((_) {
+      if (mounted && (_audioPlayer.playing ||
+          _audioPlayer.processingState == ProcessingState.loading ||
+          _audioPlayer.processingState == ProcessingState.buffering)) {
+        debugPrint('[AudioSession] becomingNoisy → stop');
+        _stoppedByHeadphones = true;
+        _wasPlayingBeforeInterruption = false;
+        _shouldResumeWhenNetworkReturns = false;
+        _isRestarting = true;
+        _audioPlayer.stop().then((_) => _isRestarting = false);
+      }
+    });
+
+    _interruptionStreamSubscription =
+        audioSession.interruptionEventStream.listen((event) async {
+      debugPrint('[AudioSession] begin=${event.begin}, type=${event.type}');
+
+      if (event.begin) {
+        // ── Inicio de interrupción (llamada entrante, timbrada, etc.) ────────
+        _interruptionFallbackTimer?.cancel();
+        _interruptionBeganAt = DateTime.now();
+        _interruptionActive = true;
+
+        // Bug A fix: audio_session llama pause() nativo ANTES de que nuestro Dart listener corra,
+        // por eso _audioPlayer.playing puede ser false aunque el usuario quería que sonara.
+        // _shouldResumeWhenNetworkReturns es true si el usuario inició la reproducción
+        // y solo se limpia cuando el usuario explicitamente aprieta stop.
+        // _wasManuallyPaused: si el usuario pausó manualmente, NO reconectar después.
+        final wasIntendingToPlay = _audioPlayer.playing ||
+            _audioPlayer.processingState == ProcessingState.loading ||
+            _audioPlayer.processingState == ProcessingState.buffering ||
+            _isConnecting ||
+            (_shouldResumeWhenNetworkReturns && !_wasManuallyPaused);
+
+        if (wasIntendingToPlay) {
+          _wasPlayingBeforeInterruption = true;
+          _wasManuallyPaused = false; // Esto NO es una pausa manual del usuario
+          _stoppedByHeadphones = false;
+
+          debugPrint('[AudioSession] Interrupción → stop() para limpiar buffer');
+          // Marcar _isRestarting SOLO para el stop, NO para el reconnect posterior
+          _isRestarting = true;
+          try {
+            await _audioPlayer.stop();
+          } catch (e) {
+            debugPrint('[AudioSession] Error en stop: $e');
+          } finally {
+            // CRÍTICO: limpiar _isRestarting después del stop
+            // para que _doReconnectAfterInterruption pueda ejecutarse
+            _isRestarting = false;
+          }
+
+          // Fallback: si el sistema nunca envía begin=false (timbrada sin respuesta),
+          // reconectar al live-edge después de 35s.
+          // Con androidStopForegroundOnPause:false el servicio siempre está activo
+          // → podemos reconectar desde BG sin ForegroundServiceStartNotAllowedException.
+          _interruptionFallbackTimer = Timer(const Duration(seconds: 35), () async {
+            if (mounted && _wasPlayingBeforeInterruption) {
+              debugPrint('[AudioSession] Fallback 35s → forzando reconexión (bg=$_isInBackground)');
+              _wasPlayingBeforeInterruption = false;
+              _interruptionBeganAt = null;
+              _interruptionFallbackTimer = null;
+              _pendingReconnectAfterInterruption = true;
+              // Intentar siempre — el servicio ya está corriendo
+              await _doReconnectAfterInterruption();
+            }
+          });
+        }
+
+      } else {
+        // ── Fin de interrupción ──────────────────────────────────────────────
+        _interruptionFallbackTimer?.cancel();
+        _interruptionFallbackTimer = null;
+
+        final duracion = _interruptionBeganAt != null
+            ? DateTime.now().difference(_interruptionBeganAt!)
+            : Duration.zero;
+        _interruptionBeganAt = null;
+
+        debugPrint('[AudioSession] Fin interrupción — ${duracion.inSeconds}s — bg=$_isInBackground');
+
+        if (!mounted || !_wasPlayingBeforeInterruption) {
+          // No estaba sonando antes → no reconectar
+          _wasPlayingBeforeInterruption = false;
+          _isRestarting = false;
+          _interruptionActive = false;
+          return;
+        }
+
+        _wasPlayingBeforeInterruption = false;
+        _isRestarting = false; // Asegurar limpieza
+        _pendingReconnectAfterInterruption = true;
+
+        // Con androidStopForegroundOnPause:false el servicio de audio siempre está corriendo.
+        // Podemos reconectar desde BG directamente sin ForegroundServiceStartNotAllowedException.
+        if (_isInBackground) {
+          debugPrint('[AudioSession] BG → reconectando directamente (servicio activo)');
+        } else {
+          debugPrint('[AudioSession] FG → reconectando al live edge');
+        }
+        await _doReconnectAfterInterruption();
+      }
+    });  
   }
 
   void _showTimerAndAlarmDialog() {
@@ -466,22 +978,22 @@ class _RadioHomeState extends State<RadioHome>
       builder: (BuildContext context) {
         return SimpleDialog(
           backgroundColor: _isDarkMode ? const Color(0xFF0A192F) : Colors.white,
-          title: Text('Temporizador e Alarme',
+          title: Text(t('timerDialogTitle'),
               style: TextStyle(color: titleColor)),
           children: <Widget>[
-            _buildTimerOption(15, 'Desligar em 15 minutos'),
-            _buildTimerOption(30, 'Desligar em 30 minutos'),
-            _buildTimerOption(60, 'Desligar em 1 hora'),
+            _buildTimerOption(15, t('timer15')),
+            _buildTimerOption(30, t('timer30')),
+            _buildTimerOption(60, t('timer60')),
             _buildCustomTimerOption(),
             if (_sleepTimer != null)
-              _buildCancelOption('Cancelar Temporizador', _cancelSleepTimer,
-                  'Temporizador de apagado cancelado.'),
+              _buildCancelOption(t('timerCancelLabel'), _cancelSleepTimer,
+                  t('timerCancelMsg')),
             if (_supportsAndroidAlarm) ...[
               const Divider(),
-              _buildAlarmOption('Programar Alarme', _selectAlarmTime),
+              _buildAlarmOption(t('alarmSchedule'), _selectAlarmTime),
               if (_alarmTime != null)
                 _buildCancelOption(
-                    'Cancelar Alarme', _cancelAlarm, 'Alarma cancelada.'),
+                    t('alarmCancel'), _cancelAlarm, t('alarmCancelMsg')),
             ]
           ],
         );
@@ -496,7 +1008,7 @@ class _RadioHomeState extends State<RadioHome>
         Navigator.pop(context);
         _selectCustomTimer();
       },
-      child: Text('Tempo Personalizado...',
+      child: Text(t('timerCustom'),
           style: TextStyle(color: textColor, fontWeight: FontWeight.bold)),
     );
   }
@@ -516,12 +1028,12 @@ class _RadioHomeState extends State<RadioHome>
           backgroundColor: bgColor,
           shape:
               RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-          title: Text('Tempo Personalizado',
+          title: Text(t('timerCustomTitle'),
               style: TextStyle(color: textColor, fontWeight: FontWeight.bold)),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text('Digite a duração exata para desligar a rádio:',
+              Text(t('timerCustomDesc'),
                   style: TextStyle(
                       color: textColor.withOpacity(0.8), fontSize: 14)),
               const SizedBox(height: 20),
@@ -537,7 +1049,7 @@ class _RadioHomeState extends State<RadioHome>
                           fontSize: 24,
                           fontWeight: FontWeight.bold),
                       decoration: InputDecoration(
-                        labelText: 'Horas',
+                        labelText: t('timerHours'),
                         labelStyle: TextStyle(
                             color: textColor.withOpacity(0.6), fontSize: 14),
                         enabledBorder: OutlineInputBorder(
@@ -569,7 +1081,7 @@ class _RadioHomeState extends State<RadioHome>
                           fontSize: 24,
                           fontWeight: FontWeight.bold),
                       decoration: InputDecoration(
-                        labelText: 'Minutos',
+                        labelText: t('timerMinutes'),
                         labelStyle: TextStyle(
                             color: textColor.withOpacity(0.6), fontSize: 14),
                         enabledBorder: OutlineInputBorder(
@@ -590,7 +1102,7 @@ class _RadioHomeState extends State<RadioHome>
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, false),
-              child: Text('Cancelar',
+              child: Text(t('btnCancel'),
                   style: TextStyle(color: textColor.withOpacity(0.6))),
             ),
             ElevatedButton(
@@ -672,7 +1184,7 @@ class _RadioHomeState extends State<RadioHome>
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
           content:
-              Text('La radio se apagará en ${duration.inMinutes} minutos.')),
+              Text(tArgs('timerSnack', {'min': duration.inMinutes.toString()}))),
     );
     if (mounted) setState(() {});
   }
@@ -738,13 +1250,13 @@ class _RadioHomeState extends State<RadioHome>
               backgroundColor: bgColor,
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(20)),
-              title: Text('Dias da semana',
+              title: Text(t('alarmDaysTitle'),
                   style:
                       TextStyle(color: txtColor, fontWeight: FontWeight.bold)),
               content: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text('Selecione os dias para o alarme:',
+                  Text(t('alarmDaysDesc'),
                       style: TextStyle(
                           color: txtColor.withOpacity(0.7), fontSize: 14)),
                   const SizedBox(height: 16),
@@ -794,8 +1306,8 @@ class _RadioHomeState extends State<RadioHome>
                   const SizedBox(height: 8),
                   Text(
                     selectedDays.isEmpty
-                        ? 'Alarme único (próxima ocorrência)'
-                        : 'Repetir semanalmente',
+                        ? t('alarmOnce')
+                        : t('alarmRepeat'),
                     style: TextStyle(
                         color: txtColor.withOpacity(0.5),
                         fontSize: 12,
@@ -806,7 +1318,7 @@ class _RadioHomeState extends State<RadioHome>
               actions: [
                 TextButton(
                   onPressed: () => Navigator.pop(context, null),
-                  child: Text('Cancelar',
+                  child: Text(t('btnCancel'),
                       style: TextStyle(color: txtColor.withOpacity(0.6))),
                 ),
                 ElevatedButton(
@@ -873,16 +1385,21 @@ class _RadioHomeState extends State<RadioHome>
   }
 
   Future<void> _scheduleOneAlarm(int id, DateTime scheduledTime) async {
+    final _p = await SharedPreferences.getInstance();
+    final _langSaved = _p.getString('app_lang') ?? 'pt';
+    String _langCode = 'pt';
+    if (_langSaved.startsWith('es')) _langCode = 'es';
+    if (_langSaved.startsWith('en')) _langCode = 'en';
     await flutterLocalNotificationsPlugin.zonedSchedule(
       id,
-      'A Voz da Cura Divina',
-      'Alarme! Toque para ouvir a rádio',
+      t('notifAlarmTitle'),
+      t('notifAlarmBody', _langCode),
       tz.TZDateTime.from(scheduledTime, tz.local),
-      const NotificationDetails(
+      NotificationDetails(
         android: AndroidNotificationDetails(
           'alarm_channel',
-          'Alarme Despertador',
-          channelDescription: 'Canal para o alarme da rádio',
+          t('notifAlarmChannel', _langCode),
+          channelDescription: t('notifAlarmChannelDesc', _langCode),
           importance: Importance.max,
           priority: Priority.max,
           fullScreenIntent: true,
@@ -1002,7 +1519,7 @@ class _RadioHomeState extends State<RadioHome>
                                           size: 16,
                                           color: Colors.blue.shade700),
                                       const SizedBox(width: 8),
-                                      Text("Versículo Diário",
+                                      Text(t('verseTitle'),
                                           style: TextStyle(
                                               color: textColor,
                                               fontWeight: FontWeight.bold,
@@ -1024,7 +1541,7 @@ class _RadioHomeState extends State<RadioHome>
                           const Divider(),
                           ListTile(
                               leading: Icon(Icons.language, color: iconColor),
-                              title: Text("Website",
+                              title: Text(t('menuWebsite'),
                                   style: TextStyle(color: textColor)),
                               onTap: () {
                                 Navigator.pop(context);
@@ -1033,7 +1550,7 @@ class _RadioHomeState extends State<RadioHome>
                               }),
                           ListTile(
                               leading: Icon(Icons.audio_file, color: iconColor),
-                              title: Text("Reprises - Audios",
+                              title: Text(t('menuAudios'),
                                   style: TextStyle(color: textColor)),
                               onTap: () {
                                 Navigator.pop(context);
@@ -1043,7 +1560,7 @@ class _RadioHomeState extends State<RadioHome>
                           ListTile(
                               leading:
                                   Icon(Icons.contact_mail, color: iconColor),
-                              title: Text("Contato",
+                              title: Text(t('menuContact'),
                                   style: TextStyle(color: textColor)),
                               onTap: () {
                                 Navigator.pop(context);
@@ -1052,7 +1569,7 @@ class _RadioHomeState extends State<RadioHome>
                               }),
                           ListTile(
                               leading: Icon(Icons.notes, color: iconColor),
-                              title: Text("Pedidos de Oração",
+                              title: Text(t('menuPrayerRequests'),
                                   style: TextStyle(color: textColor)),
                               onTap: () {
                                 Navigator.pop(context);
@@ -1062,7 +1579,7 @@ class _RadioHomeState extends State<RadioHome>
                           ListTile(
                               leading:
                                   Icon(Icons.location_on, color: iconColor),
-                              title: Text("Endereços",
+                              title: Text(t('menuAddresses'),
                                   style: TextStyle(color: textColor)),
                               onTap: () {
                                 Navigator.pop(context);
@@ -1072,7 +1589,7 @@ class _RadioHomeState extends State<RadioHome>
                           ListTile(
                               leading: Icon(Icons.volunteer_activism,
                                   color: iconColor),
-                              title: Text("Ajude esta obra",
+                              title: Text(t('menuSupport'),
                                   style: TextStyle(color: textColor)),
                               onTap: () {
                                 Navigator.pop(context);
@@ -1082,15 +1599,15 @@ class _RadioHomeState extends State<RadioHome>
                           const Divider(),
                           ListTile(
                               leading: Icon(Icons.alarm_add, color: iconColor),
-                              title: Text("Temporizador e Alarme",
+                              title: Text(t('timerDialogTitle'),
                                   style: TextStyle(color: textColor)),
                               onTap: _showTimerAndAlarmDialog),
                           ListTile(
                               leading: Icon(Icons.share, color: iconColor),
-                              title: Text("Compartilhar",
+                              title: Text(t('menuShare'),
                                   style: TextStyle(color: textColor)),
                               onTap: () => Share.share(
-                                  'Confira A Voz da Cura Divina: https://play.google.com/store/apps/details?id=com.kym.lavozdelacuradivina.radio')),
+                                  t('shareText'))),
                         ],
                       ),
                     ))))));
@@ -1111,6 +1628,12 @@ class _RadioHomeState extends State<RadioHome>
         borderRadius: BorderRadius.circular(40.0),
         child: Stack(
           children: [
+            if (MediaQuery.of(context).orientation == Orientation.landscape)
+              Positioned.fill(
+                  child: Opacity(
+                      opacity: _isDarkMode ? 0.3 : 0.6,
+                      child: Image.asset('assets/NUBE.webp',
+                          fit: BoxFit.cover))),
             if (!_isDarkMode)
               Positioned.fill(
                   child: ImageFiltered(
@@ -1256,7 +1779,7 @@ class _RadioHomeState extends State<RadioHome>
                       child: Container(
                           decoration: BoxDecoration(
                               color: _isDarkMode
-                                  ? Colors.blue.withOpacity(0.1)
+                                  ? Colors.blue.withOpacity(0.2)
                                   : baseBgColor.withOpacity(0.8),
                               borderRadius: BorderRadius.circular(40.0),
                               border: Border.all(
@@ -1500,9 +2023,9 @@ class _RadioHomeState extends State<RadioHome>
                                                       : null,
                                                   boxShadow: neumorphicShadows),
                                               child: _isConnecting
-                                                  ? LoadingAnimationWidget.inkDrop(
+                                                  ? LoadingAnimationWidget.staggeredDotsWave(
                                                       color: playIconColor,
-                                                      size: 35.0)
+                                                      size: 32)
                                                   : Icon(
                                                       _audioPlayer.playerState.playing ? Icons.stop : Icons.play_arrow,
                                                       color: playIconColor,
@@ -1583,31 +2106,32 @@ class _RadioHomeState extends State<RadioHome>
                       height: 140,
                       decoration: BoxDecoration(
                           color: _isDarkMode
-                              ? Colors.black.withOpacity(0.2)
+                              ? baseBgColor
                               : Colors.white.withOpacity(0.75),
                           shape: BoxShape.circle,
-                          border: Border.all(
-                              color: (_isDarkMode ? Colors.white : Colors.black)
-                                  .withOpacity(0.1)),
+                          border: _isDarkMode
+                              ? Border.all(color: Colors.grey.shade700, width: 1)
+                              : Border.all(
+                                  color: (Colors.black).withOpacity(0.1)),
                           boxShadow: neumorphicShadows),
                       child: _isConnecting
-                          ? LoadingAnimationWidget.inkDrop(
-                              color: Colors.black, size: 45.0)
+                          ? LoadingAnimationWidget.staggeredDotsWave(
+                              color: Colors.black, size: 40)
                           : Icon(
                               _audioPlayer.playerState.playing
                                   ? Icons.stop
                                   : Icons.play_arrow,
-                              color: Colors.black,
+                              color: playIconColor,
                               size: 70))),
               const SizedBox(height: 30),
               Container(
                 width: 250,
                 decoration: BoxDecoration(
-                    color: _isDarkMode ? Colors.black26 : Colors.white60,
+                    color: _isDarkMode ? baseBgColor : Colors.white60,
                     borderRadius: BorderRadius.circular(20),
-                    border: Border.all(
-                        color: (_isDarkMode ? Colors.white : Colors.black)
-                            .withOpacity(0.05)),
+                    border: _isDarkMode
+                        ? Border.all(color: Colors.grey.shade700, width: 1)
+                        : Border.all(color: (Colors.black).withOpacity(0.05)),
                     boxShadow: neumorphicShadows),
                 child: SliderTheme(
                   data: SliderTheme.of(context).copyWith(
@@ -1621,7 +2145,7 @@ class _RadioHomeState extends State<RadioHome>
                     value: _volume,
                     min: 0.0,
                     max: 1.0,
-                    activeColor: Colors.black,
+                    activeColor: playIconColor,
                     inactiveColor: textColor.withOpacity(0.2),
                     onChanged: (val) {
                       setState(() => _volume = val);
@@ -1684,13 +2208,14 @@ class _RadioHomeState extends State<RadioHome>
 
   @override
   Widget build(BuildContext context) {
+    final Color darkTopColor = const Color(0xFF0037DB);
     final Color baseBgColor =
-        _isDarkMode ? const Color(0xFF0A192F) : const Color(0xFFB2EBF2);
-    final Color textColor = _isDarkMode ? Colors.blue.shade700 : Colors.black;
+        _isDarkMode ? const Color(0xFF000D33) : const Color(0xFFB2EBF2);
+    final Color textColor = _isDarkMode ? Colors.blue.shade400 : Colors.black;
     final Color headerBgColor =
         _isDarkMode ? Colors.black : const Color.fromARGB(255, 255, 255, 255);
     final Color playIconColor =
-        _isDarkMode ? Colors.blue : const Color.fromARGB(255, 53, 53, 53);
+        _isDarkMode ? Colors.blue.shade700 : const Color.fromARGB(255, 53, 53, 53);
     final Color websiteIconColor = _isDarkMode
         ? Colors.blue.shade700
         : const Color.fromARGB(255, 54, 54, 54);
@@ -1730,7 +2255,7 @@ class _RadioHomeState extends State<RadioHome>
                         const SizedBox(height: 20),
                         ElevatedButton(
                             onPressed: _initializePlayer,
-                            child: const Text('Reintentar'))
+                            child: Text(t('btnRetry')))
                       ]))));
 
     return PopScope(
@@ -1745,6 +2270,8 @@ class _RadioHomeState extends State<RadioHome>
       child: Scaffold(
         key: _scaffoldKey,
         resizeToAvoidBottomInset: false,
+        extendBody: true,
+        extendBodyBehindAppBar: true,
         drawer: MediaQuery.of(context).orientation == Orientation.landscape
             ? null
             : null, // Drawer deshabilitado en retrato a petición del usuario
@@ -1756,8 +2283,7 @@ class _RadioHomeState extends State<RadioHome>
                 gradient: LinearGradient(
                   colors: _isDarkMode
                       ? [
-                          const Color.fromARGB(255, 0, 55, 219)
-                              .withOpacity(0.9),
+                          darkTopColor.withOpacity(0.9),
                           baseBgColor
                         ]
                       : [const Color(0xFF80DEEA), baseBgColor],
@@ -1770,14 +2296,15 @@ class _RadioHomeState extends State<RadioHome>
               ),
             ),
             if (!_isWebMode) ...[
-              Positioned(
-                  top: 30,
-                  left: 0,
-                  right: 0,
-                  child: Opacity(
-                      opacity: _isDarkMode ? 0.3 : 0.6,
-                      child: Image.asset('assets/NUBE.webp',
-                          height: 280, fit: BoxFit.cover))),
+              if (MediaQuery.of(context).orientation != Orientation.landscape)
+                Positioned(
+                    top: 30,
+                    left: 0,
+                    right: 0,
+                    child: Opacity(
+                        opacity: _isDarkMode ? 0.3 : 0.6,
+                        child: Image.asset('assets/NUBE.webp',
+                            height: 280, fit: BoxFit.cover))),
               SafeArea(
                 child: MediaQuery.of(context).orientation ==
                         Orientation.landscape
@@ -1823,10 +2350,14 @@ class _RadioHomeState extends State<RadioHome>
                       ? SystemUiOverlayStyle.light.copyWith(
                           statusBarColor: Colors.transparent,
                           systemNavigationBarColor: Colors.transparent,
+                          systemNavigationBarDividerColor: Colors.transparent,
+                          systemNavigationBarContrastEnforced: false,
                         )
                       : SystemUiOverlayStyle.dark.copyWith(
                           statusBarColor: Colors.transparent,
                           systemNavigationBarColor: Colors.transparent,
+                          systemNavigationBarDividerColor: Colors.transparent,
+                          systemNavigationBarContrastEnforced: false,
                         ),
                   child: Container(
                     color: _isDarkMode ? Colors.black : Colors.white,
@@ -1853,9 +2384,17 @@ class _RadioHomeState extends State<RadioHome>
   }
 
   Widget _buildWebView() {
-    return Column(
+    final bottomPadding = MediaQuery.of(context).padding.bottom;
+    
+    // 1. Usamos los colores base oficiales de tu app
+    final webBaseColor = _isDarkMode 
+        ? const Color(0xFF000D33) // Azul oscuro
+        : const Color(0xFFB2EBF2); // Celeste claro
+
+    return Stack(
       children: [
-        Expanded(
+        // WebView (La página web)
+        Positioned.fill(
           child: InAppWebView(
             initialUrlRequest: URLRequest(url: WebUri(_currentWebUrl)),
             initialSettings: InAppWebViewSettings(
@@ -1863,6 +2402,7 @@ class _RadioHomeState extends State<RadioHome>
               useShouldOverrideUrlLoading: true,
               verticalScrollBarEnabled: true,
               disableVerticalScroll: false,
+              transparentBackground: true,
             ),
             onWebViewCreated: (controller) => _webViewController = controller,
             shouldOverrideUrlLoading: (controller, navigationAction) async {
@@ -1877,7 +2417,7 @@ class _RadioHomeState extends State<RadioHome>
               return NavigationActionPolicy.ALLOW;
             },
             onLoadStop: (controller, url) async {
-              // Hide Web Player and unnecessary elements
+              // Solo dejamos el script para ocultar los reproductores de la web
               await controller.evaluateJavascript(source: """
                 (function() {
                   var style = document.createElement('style');
@@ -1892,6 +2432,36 @@ class _RadioHomeState extends State<RadioHome>
                 })();
               """);
             },
+          ),
+        ),
+
+        // 2. Capa Única: Desenfoque + Degradado a color base (Sin líneas)
+        Positioned(
+          bottom: 0,
+          left: 0,
+          right: 0,
+          child: ClipRect(
+            child: BackdropFilter(
+              // Desenfoque alto para que las letras web se vuelvan sombras irreconocibles
+              filter: ImageFilter.blur(sigmaX: 35.0, sigmaY: 35.0),
+              child: Container(
+                // Altura de 130 + padding para cubrir perfectamente el mini reproductor
+                height: bottomPadding + 130, 
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.transparent,
+                      webBaseColor.withOpacity(0.85), // Se mezcla con el color de tu app
+                      webBaseColor, // Termina en color sólido para máxima legibilidad
+                    ],
+                    stops: const [0.0, 0.45, 1.0], // Transición suave
+                  ),
+                  // ¡Se eliminó la propiedad border! Adiós a la línea negra fina.
+                ),
+              ),
+            ),
           ),
         ),
       ],
@@ -1941,8 +2511,8 @@ class _RadioHomeState extends State<RadioHome>
   Widget _buildMiniPlayer(
       BuildContext context, Color textColor, Color playIconColor) {
     final playerBgColor = _isDarkMode
-        ? const Color(0xFF0A192F).withOpacity(0.92)
-        : const Color(0xFFB2EBF2).withOpacity(0.90);
+        ? const Color(0xFF0A192F).withOpacity(0.50)
+        : const Color(0xFFB2EBF2).withOpacity(0.50);
     final contrastColor = _isDarkMode ? Colors.white : Colors.black;
     final secondaryTextColor = _isDarkMode ? Colors.white70 : Colors.black87;
 
@@ -1985,8 +2555,8 @@ class _RadioHomeState extends State<RadioHome>
                         color: contrastColor.withOpacity(0.1),
                       ),
                       child: _isConnecting
-                          ? LoadingAnimationWidget.inkDrop(
-                              color: contrastColor, size: 20)
+                          ? LoadingAnimationWidget.staggeredDotsWave(
+                              color: contrastColor, size: 18)
                           : Icon(
                               _audioPlayer.playerState.playing
                                   ? Icons.stop
@@ -2201,7 +2771,7 @@ class _RadioHomeState extends State<RadioHome>
                   padding:
                       const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.30),
+                    color: Colors.black.withOpacity(0.8), // 80% de opacidad (bajado un 20%)
                     borderRadius: const BorderRadius.only(
                       bottomLeft: Radius.circular(28),
                       bottomRight: Radius.circular(28),
@@ -2211,8 +2781,8 @@ class _RadioHomeState extends State<RadioHome>
                     children: [
                       const _BlinkingLiveIndicator(),
                       const SizedBox(width: 6),
-                      Icon(Icons.sensors,
-                          color: contrastColor.withOpacity(0.6), size: 14),
+                      const Icon(Icons.sensors,
+                          color: Colors.white70, size: 14),
                       const SizedBox(width: 6),
                       Expanded(
                         child: SizedBox(
@@ -2221,8 +2791,8 @@ class _RadioHomeState extends State<RadioHome>
                             text: _marqueeText.isNotEmpty
                                 ? _marqueeText
                                 : 'A Voz da Cura Divina no Ar',
-                            style: TextStyle(
-                                color: contrastColor.withOpacity(0.6),
+                            style: const TextStyle(
+                                color: Colors.white,
                                 fontSize: 11),
                             scrollAxis: Axis.horizontal,
                             velocity: 30.0,
@@ -2332,7 +2902,7 @@ class _RadioHomeState extends State<RadioHome>
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text("Versículo Diário",
+                                Text(t('verseTitle'),
                                     style: GoogleFonts.inter(
                                         fontSize: 18,
                                         fontWeight: FontWeight.w800,
@@ -2359,7 +2929,7 @@ class _RadioHomeState extends State<RadioHome>
                                   child: _buildMenuMainItem(
                                       animation,
                                       2,
-                                      "Website",
+                                      t('menuWebsite'),
                                       () => _openWebMenuLink(
                                           "https://www.igrejaprimitivadoutrinadivina.com/")),
                                 ),
@@ -2367,23 +2937,23 @@ class _RadioHomeState extends State<RadioHome>
                                   _buildMenuSubItem(
                                       animation,
                                       3,
-                                      "Reprises - Audios",
+                                      t('menuAudios'),
                                       "https://igrejaprimitivadoutrinadivina.com/internas/audios"),
-                                  _buildMenuSubItem(animation, 4, "Contato",
+                                  _buildMenuSubItem(animation, 4, t('menuContact'),
                                       "https://www.igrejaprimitivadoutrinadivina.com/contato"),
                                   _buildMenuSubItem(
                                       animation,
                                       5,
-                                      "Pedidos de Oração",
+                                      t('menuPrayerRequests'),
                                       "https://www.igrejaprimitivadoutrinadivina.com/recados"),
-                                  _buildMenuSubItem(animation, 6, "Endereços",
+                                  _buildMenuSubItem(animation, 6, t('menuAddresses'),
                                       "https://igrejaprimitivadoutrinadivina.com/internas/enderecos-ipdd"),
                                   _buildMenuSubItem(
                                       animation,
                                       7,
-                                      "Ajude esta obra",
+                                      t('menuSupport'),
                                       "https://www.igrejaprimitivadoutrinadivina.com/internas/contas-bancarias",
-                                      "(Contas e Pix)"),
+                                      "(${t('menuSupportSub')})"),
                                 ].map((item) => Padding(
                                     padding: const EdgeInsets.only(left: 28.0),
                                     child: item)),
@@ -2391,7 +2961,7 @@ class _RadioHomeState extends State<RadioHome>
                                 Padding(
                                   padding: const EdgeInsets.only(left: 28.0),
                                   child: _buildMenuMainItem(
-                                      animation, 8, "Alarme", () {
+                                      animation, 8, t('menuAlarm'), () {
                                     if (!mounted || _isNavigating) return;
                                     _isNavigating = true;
                                     Navigator.pop(context);
@@ -2400,18 +2970,18 @@ class _RadioHomeState extends State<RadioHome>
                                         const Duration(milliseconds: 500), () {
                                       if (mounted) _isNavigating = false;
                                     });
-                                  }, subText: "e Temporizador"),
+                                  }, subText: t('menuAlarmSub')),
                                 ),
                                 const SizedBox(height: 15),
                                 Padding(
                                   padding: const EdgeInsets.only(left: 28.0),
                                   child: _buildMenuMainItem(
-                                      animation, 9, "Compartilhar", () {
+                                      animation, 9, t('menuShare'), () {
                                     if (!mounted || _isNavigating) return;
                                     _isNavigating = true;
                                     Navigator.pop(context);
                                     Share.share(
-                                        'Confira A Voz da Cura Divina: https://play.google.com/store/apps/details?id=com.kym.lavozdelacuradivina.radio');
+                                        t('shareText'));
                                     Future.delayed(
                                         const Duration(milliseconds: 500), () {
                                       if (mounted) _isNavigating = false;
@@ -2653,9 +3223,15 @@ class _PulseCloseButtonState extends State<_PulseCloseButton>
       scale: _scale,
       child: GestureDetector(
         onTap: () => _controller.forward(),
-        child: const Padding(
+        child: Padding(
           padding: EdgeInsets.all(8.0),
-          child: Icon(Icons.close, color: Colors.black, size: 42),
+          child: Icon(
+            Icons.close,
+            color: Theme.of(context).brightness == Brightness.dark
+                ? Colors.white
+                : Colors.black,
+            size: 42,
+          ),
         ),
       ),
     );
