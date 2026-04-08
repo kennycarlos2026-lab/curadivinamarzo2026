@@ -34,9 +34,14 @@ const _strings = {
     'en': 'Contact',
   },
   'menuPrayerRequests': {
-    'pt': 'Pedidos de Oração',
-    'es': 'Pedidos de Oración',
-    'en': 'Prayer Requests',
+    'pt': 'Peça oração',
+    'es': 'Pida oración',
+    'en': 'Request Prayer',
+  },
+  'menuPrayerRequestsSub': {
+    'pt': '– Testemunho',
+    'es': '– Testimonio',
+    'en': '– Testimony',
   },
   'menuAddresses': {
     'pt': 'Endereços',
@@ -234,6 +239,55 @@ const _strings = {
     'pt': 'Cancelar',
     'es': 'Cancelar',
     'en': 'Cancel',
+  },
+
+  // ─────────────────────────────────────────
+  // MODO DE SEÑAL / BUFFER
+  // ─────────────────────────────────────────
+  'menuSignal': {
+    'pt': 'Qualidade do Sinal',
+    'es': 'Calidad de Señal',
+    'en': 'Signal Quality',
+  },
+  'signalDialogTitle': {
+    'pt': 'Modo de Reprodução',
+    'es': 'Modo de Reproducción',
+    'en': 'Playback Mode',
+  },
+  'signalStableTitle': {
+    'pt': 'Estável',
+    'es': 'Estable',
+    'en': 'Stable',
+  },
+  'signalStableDesc': {
+    'pt': 'Protege contra quedas de sinal.\nIdeal para redes móveis ou instáveis.',
+    'es': 'Protege ante cortes de señal.\nIdeal para redes móviles o inestables.',
+    'en': 'Protects against signal drops.\nBest for mobile or unstable networks.',
+  },
+  'signalLiveTitle': {
+    'pt': 'Ao Vivo',
+    'es': 'En Vivo',
+    'en': 'Live Edge',
+  },
+  'signalLiveDesc': {
+    'pt': 'Mínimo atraso em relação ao ar.\nRequer conexão estável (Wi-Fi).',
+    'es': 'Mínimo retraso respecto al aire.\nRequiere señal estable (Wi-Fi).',
+    'en': 'Minimum delay from broadcast.\nRequires stable connection (Wi-Fi).',
+  },
+  'signalChanged': {
+    'pt': 'Modo alterado. Reconectando...',
+    'es': 'Modo cambiado. Reconectando...',
+    'en': 'Mode changed. Reconnecting...',
+  },
+  'signalNotifStable': {
+    'pt': '📶 Estável',
+    'es': '📶 Estable',
+    'en': '📶 Stable',
+  },
+  'signalNotifLive': {
+    'pt': '⚡ Ao Vivo',
+    'es': '⚡ En Vivo',
+    'en': '⚡ Live',
   },
 };
 

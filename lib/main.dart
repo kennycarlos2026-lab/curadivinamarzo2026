@@ -11,7 +11,9 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:marquee/marquee.dart';
 
+import 'package:permission_handler/permission_handler.dart';
 import 'package:just_audio_background/just_audio_background.dart';
+import 'package:audio_service/audio_service.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:share_plus/share_plus.dart';
@@ -41,6 +43,66 @@ final StreamController<String?> selectNotificationStream =
     StreamController<String?>.broadcast();
 final ReceivePort alarmReceivePort = ReceivePort();
 
+// Player global
+final AudioPlayer _globalAudioPlayer = AudioPlayer();
+
+// Referencia global al handler
+_StopAsPauseHandler? _globalAudioHandler;
+
+/// Handler que intercepta el comando stop() de la notificación
+/// y lo redirige a pause() para que la notificación no se destruya.
+class _StopAsPauseHandler extends BaseAudioHandler {
+  final AudioPlayer player;
+  StreamSubscription? _playerSub;
+  StreamSubscription? _mediaSub;
+
+  _StopAsPauseHandler(this.player) {
+    _bindToPlayer();
+  }
+
+  void _bindToPlayer() {
+    _mediaSub?.cancel();
+    _mediaSub = player.sequenceStateStream.listen((state) {
+      final tag = state?.currentSource?.tag;
+      if (tag is MediaItem) mediaItem.add(tag);
+    });
+
+    _playerSub?.cancel();
+    _playerSub = player.playbackEventStream.listen((event) {
+      final playing = player.playing;
+      playbackState.add(playbackState.value.copyWith(
+        controls: [
+          if (playing) MediaControl.pause else MediaControl.play,
+          MediaControl.stop,
+        ],
+        systemActions: const {MediaAction.seek},
+        androidCompactActionIndices: const [0, 1],
+        processingState: {
+          ProcessingState.idle: AudioProcessingState.idle,
+          ProcessingState.loading: AudioProcessingState.loading,
+          ProcessingState.buffering: AudioProcessingState.buffering,
+          ProcessingState.ready: AudioProcessingState.ready,
+          ProcessingState.completed: AudioProcessingState.completed,
+        }[player.processingState]!,
+        playing: playing,
+      ));
+    });
+  }
+
+  @override
+  Future<void> play() => player.play();
+
+  @override
+  Future<void> pause() => player.pause();
+
+  @override
+  Future<void> stop() => player.pause(); // ← redirige stop → pause
+
+  @override
+  Future<void> seek(Duration position) => player.seek(position);
+}
+
+
 @pragma('vm:entry-point')
 void playRadio() async {
   final SendPort? sendPort = IsolateNameServer.lookupPortByName('alarm_port');
@@ -65,7 +127,7 @@ void playRadio() async {
       id: streamUrl,
       title: 'A Voz da Cura Divina - Alarma',
       artist: 'Radio ao vivo',
-      artUri: Uri.parse('https://i.ibb.co/nMT6qsRN/ipddceu.jpg'),
+      artUri: Uri.parse('https://i.ibb.co/nNFYTMZM/ceunotifi.jpg'),
     );
     await audioPlayer
         .setAudioSource(AudioSource.uri(Uri.parse(streamUrl), tag: mediaItem));
@@ -87,9 +149,18 @@ Future<String> _loadStreamUrl() async {
     fetchTimeout: const Duration(seconds: 10),
     minimumFetchInterval: const Duration(hours: 1),
   ));
+  
+  // Valores por defecto si no hay internet la primera vez
   await remoteConfig.setDefaults({
     'stream_url': 'https://s10.maxcast.com.br:9083/live',
+    'url_website': 'https://www.igrejaprimitivadoutrinadivina.com/',
+    'url_audios': 'https://igrejaprimitivadoutrinadivina.com/internas/audios',
+    'url_contacto': 'https://www.igrejaprimitivadoutrinadivina.com/contato',
+    'url_pedidos': 'https://www.igrejaprimitivadoutrinadivina.com/recados',
+    'url_direcciones': 'https://igrejaprimitivadoutrinadivina.com/internas/enderecos-ipdd',
+    'url_apoyo': 'https://www.igrejaprimitivadoutrinadivina.com/internas/contas-bancarias',
   });
+  
   try {
     await remoteConfig.fetchAndActivate();
   } catch (e) {
@@ -181,13 +252,19 @@ void main() async {
   }
   try {
     if (!kIsWeb) {
-      await JustAudioBackground.init(
-        androidNotificationChannelId:
-            'com.kym.lavozdelacuradivina.radio.channel.audio',
-        androidNotificationChannelName: 'Radio A Voz da Cura Divina',
-        notificationColor: const Color(0xFF80DEEA),
-        androidNotificationIcon: 'drawable/ic_stat_igual1',
-        androidStopForegroundOnPause: false, // ← servicio siempre en primer plano
+      await AudioService.init(
+        builder: () {
+          _globalAudioHandler = _StopAsPauseHandler(_globalAudioPlayer);
+          return _globalAudioHandler!;
+        },
+        config: const AudioServiceConfig(
+          androidNotificationChannelId:
+              'com.kym.lavozdelacuradivina.radio.channel.audio',
+          androidNotificationChannelName: 'Radio A Voz da Cura Divina',
+          notificationColor: Color(0xFF80DEEA),
+          androidNotificationIcon: 'drawable/ic_stat_igual1',
+          androidStopForegroundOnPause: false,
+        ),
       );
     }
     final session = await AudioSession.instance;
@@ -245,17 +322,8 @@ class RadioHome extends StatefulWidget {
 class _RadioHomeState extends State<RadioHome>
     with WidgetsBindingObserver, TickerProviderStateMixin {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
-  AudioPlayer _audioPlayer = AudioPlayer(
-    audioLoadConfiguration: AudioLoadConfiguration(
-      androidLoadControl: AndroidLoadControl(
-        minBufferDuration: const Duration(seconds: 3),
-        maxBufferDuration: const Duration(seconds: 8),
-        bufferForPlaybackDuration: const Duration(seconds: 2),
-        bufferForPlaybackAfterRebufferDuration: const Duration(seconds: 3),
-        prioritizeTimeOverSizeThresholds: true,
-      ),
-    ),
-  );
+  // Getter: siempre apunta al player global actual (puede reasignarse al cambiar modo)
+  AudioPlayer get _audioPlayer => _globalAudioPlayer;
   bool _isDarkMode = false;
   bool _isInitialLoading = true;
   String _errorMessage = '';
@@ -278,16 +346,19 @@ class _RadioHomeState extends State<RadioHome>
   bool _stoppedByHeadphones = false;
   StreamSubscription? _interruptionStreamSubscription;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
+  // Suscripciones del player — se cancelan al cambiar modo para evitar listeners zombie
+  StreamSubscription? _icySub;
+  StreamSubscription? _playerStateSub;
+  StreamSubscription? _processingStateSub;
   bool _isRestarting = false;
   bool _shouldResumeWhenNetworkReturns = false;
   DateTime? _lastReconnectAttemptAt;
-  Timer? _interruptionFallbackTimer;        // Para timbradas sin fin de interrupción
-  DateTime? _interruptionBeganAt;           // Momento en que comenzó la interrupción
   bool _pendingReconnectAfterInterruption = false; // Reconexión diferida al foreground
   bool _wasManuallyPaused = false;
   DateTime? _lastResumeAttemptAt;
   bool _isInBackground = false;
   bool _interruptionActive = false; // true mientras dure una llamada/timbrada
+  // _isLiveEdgeMode es global (ver arriba de main()) — compartida con _StopAsPauseHandler
 
   // Web View State
   bool _isWebMode = false;
@@ -409,7 +480,7 @@ class _RadioHomeState extends State<RadioHome>
 
   void _setupPlayerStateStream() {
     // Escuchar metadatos de la radio (ICY) para el Marquee del miniplayer
-    _audioPlayer.icyMetadataStream.listen((metadata) {
+    _icySub = _audioPlayer.icyMetadataStream.listen((metadata) {
       if (metadata != null && metadata.info != null) {
         final title = metadata.info?.title ?? '';
         if (title.isNotEmpty && mounted) {
@@ -420,7 +491,7 @@ class _RadioHomeState extends State<RadioHome>
       }
     });
 
-    _audioPlayer.playerStateStream.listen((state) async {
+    _playerStateSub = _audioPlayer.playerStateStream.listen((state) async {
       if (mounted) {
         setState(() {
           if (state.playing && _errorMessage.isNotEmpty) _errorMessage = '';
@@ -475,6 +546,7 @@ class _RadioHomeState extends State<RadioHome>
           !_wasPlayingBeforeInterruption &&
           !_pendingReconnectAfterInterruption) {
         _wasManuallyPaused = true;
+        _shouldResumeWhenNetworkReturns = false; // evitar reconexión si otra app interrumpe después
         debugPrint('[Player] Pausa manual detectada – marcar para reconexión fresca');
         // No llamamos a stop() ni mutamos el volumen; la notificación sigue activa.
       }
@@ -510,7 +582,7 @@ class _RadioHomeState extends State<RadioHome>
       }
     });
 
-    _audioPlayer.processingStateStream.listen((state) {
+    _processingStateSub = _audioPlayer.processingStateStream.listen((state) {
       if (state == ProcessingState.completed) _restartStream();
     });
   }
@@ -524,10 +596,22 @@ class _RadioHomeState extends State<RadioHome>
       debugPrint('[Lifecycle] App en primer plano');
 
       if (_pendingReconnectAfterInterruption && mounted) {
-        // Pequeño delay para que Android libere el foco de audio post-llamada
         Future.delayed(const Duration(milliseconds: 800), () {
           if (mounted && _pendingReconnectAfterInterruption) {
-            _doReconnectAfterInterruption(fromLifecycle: true);
+            
+            final isStuckBuffering =
+                (_audioPlayer.processingState == ProcessingState.buffering ||
+                 _audioPlayer.processingState == ProcessingState.loading) &&
+                !_audioPlayer.playerState.playing;
+
+            final alreadyActive = _audioPlayer.playerState.playing;
+
+            if (alreadyActive && !isStuckBuffering) {
+              _pendingReconnectAfterInterruption = false;
+              debugPrint('[Lifecycle] Ya activo — cancelando reconexión pendiente');
+            } else {
+              _doReconnectAfterInterruption(fromLifecycle: true);
+            }
           }
         });
       }
@@ -543,9 +627,11 @@ class _RadioHomeState extends State<RadioHome>
     WidgetsBinding.instance.removeObserver(this);
     _interruptionStreamSubscription?.cancel();
     _connectivitySubscription?.cancel();
+    _icySub?.cancel();
+    _playerStateSub?.cancel();
+    _processingStateSub?.cancel();
     _bufferingWatchdog?.cancel();
     _equalizerController.dispose();
-    _interruptionFallbackTimer?.cancel();
     _audioPlayer.dispose();
     _volumeIndicatorTimer?.cancel();
     _sleepTimer?.cancel();
@@ -624,7 +710,7 @@ class _RadioHomeState extends State<RadioHome>
         id: urlWithTimestamp,
         title: t('notifAlarmTitle'),
         artist: 'Radio ao vivo',
-        artUri: Uri.parse('https://i.ibb.co/nMT6qsRN/ipddceu.jpg'),
+        artUri: Uri.parse('https://i.ibb.co/nNFYTMZM/ceunotifi.jpg'),
       );
       await _audioPlayer.setAudioSource(
           AudioSource.uri(Uri.parse(urlWithTimestamp),
@@ -664,38 +750,23 @@ class _RadioHomeState extends State<RadioHome>
     _isConnecting = false;
     _wasPlayingBeforeInterruption = false;
     _pendingReconnectAfterInterruption = false;
-    _interruptionFallbackTimer?.cancel();
-    _interruptionFallbackTimer = null;
     _bufferingWatchdog?.cancel();
     _bufferingWatchdog = null;
     _bufferingStartedAt = null;
     _lastResumeAttemptAt = null;
 
     try {
-      // Dispose y recrear el player — única forma de limpiar el _audioHandler
-      await _audioPlayer.dispose();
+      // No dispose: el player es global y compartido con el AudioHandler.
+      // Solo detener y reinicializar la fuente de audio es suficiente.
+      await _audioPlayer.stop();
     } catch (_) {}
 
-    // Recrear el player desde cero con la configuración de carga optimizada
-    _audioPlayer = AudioPlayer(
-      audioLoadConfiguration: AudioLoadConfiguration(
-        androidLoadControl: AndroidLoadControl(
-          minBufferDuration: const Duration(seconds: 3),
-          maxBufferDuration: const Duration(seconds: 8),
-          bufferForPlaybackDuration: const Duration(seconds: 2),
-          bufferForPlaybackAfterRebufferDuration: const Duration(seconds: 3),
-          prioritizeTimeOverSizeThresholds: true,
-        ),
-      ),
-    );
-
-    // Reconfigurar streams del nuevo player
+    // Reconfigurar streams (listeners) y reinicializar fuente de audio
     _setupPlayerStateStream();
-
-    // Reinicializar audio
     await _initializeAudio();
-    debugPrint('[Reset] Player recreado exitosamente');
+    debugPrint('[Reset] Player reinicializado exitosamente');
   }
+
 
   Future<void> _playOrStopStream() async {
     // Si el usuario quiere PARAR y hay una operación en curso → cancelarla siempre
@@ -839,7 +910,8 @@ class _RadioHomeState extends State<RadioHome>
       if (!mounted) return;
 
       // Si hay otra interrupción activa recién llegada, abortar
-      if (_wasPlayingBeforeInterruption) {
+      if (fromLifecycle) _wasPlayingBeforeInterruption = false;
+      if (_wasPlayingBeforeInterruption && !fromLifecycle) {
         debugPrint('[Reconnect] Nueva interrupción detectada → abortando');
         _pendingReconnectAfterInterruption = true;
         return;
@@ -883,16 +955,17 @@ class _RadioHomeState extends State<RadioHome>
       debugPrint('[AudioSession] begin=${event.begin}, type=${event.type}');
 
       if (event.begin) {
-        // ── Inicio de interrupción (llamada entrante, timbrada, etc.) ────────
-        _interruptionFallbackTimer?.cancel();
-        _interruptionBeganAt = DateTime.now();
+        // ── EL SISTEMA NOS QUITA EL AUDIO ──────────────────────────────────────
+
+        // 1. Notificaciones cortas (Ducking)
+        if (event.type == AudioInterruptionType.duck) {
+          debugPrint('[AudioSession] Ducking → OS baja el volumen temporalmente (sin acción)');
+          return;
+        }
+
+        // 2. Interrupciones reales (Llamadas, YouTube, Spotify, Notas de voz)
         _interruptionActive = true;
 
-        // Bug A fix: audio_session llama pause() nativo ANTES de que nuestro Dart listener corra,
-        // por eso _audioPlayer.playing puede ser false aunque el usuario quería que sonara.
-        // _shouldResumeWhenNetworkReturns es true si el usuario inició la reproducción
-        // y solo se limpia cuando el usuario explicitamente aprieta stop.
-        // _wasManuallyPaused: si el usuario pausó manualmente, NO reconectar después.
         final wasIntendingToPlay = _audioPlayer.playing ||
             _audioPlayer.processingState == ProcessingState.loading ||
             _audioPlayer.processingState == ProcessingState.buffering ||
@@ -901,53 +974,37 @@ class _RadioHomeState extends State<RadioHome>
 
         if (wasIntendingToPlay) {
           _wasPlayingBeforeInterruption = true;
-          _wasManuallyPaused = false; // Esto NO es una pausa manual del usuario
+          _wasManuallyPaused = false;
           _stoppedByHeadphones = false;
 
-          debugPrint('[AudioSession] Interrupción → stop() para limpiar buffer');
-          // Marcar _isRestarting SOLO para el stop, NO para el reconnect posterior
+          debugPrint('[AudioSession] Interrupción externa → Cediendo el audio (Stop)');
           _isRestarting = true;
           try {
+            // Nos detenemos por completo, sin temporizadores.
+            // Si es YouTube/Spotify, nos quedaremos así para siempre.
             await _audioPlayer.stop();
           } catch (e) {
             debugPrint('[AudioSession] Error en stop: $e');
           } finally {
-            // CRÍTICO: limpiar _isRestarting después del stop
-            // para que _doReconnectAfterInterruption pueda ejecutarse
             _isRestarting = false;
           }
-
-          // Fallback: si el sistema nunca envía begin=false (timbrada sin respuesta),
-          // reconectar al live-edge después de 35s.
-          // Con androidStopForegroundOnPause:false el servicio siempre está activo
-          // → podemos reconectar desde BG sin ForegroundServiceStartNotAllowedException.
-          _interruptionFallbackTimer = Timer(const Duration(seconds: 35), () async {
-            if (mounted && _wasPlayingBeforeInterruption) {
-              debugPrint('[AudioSession] Fallback 35s → forzando reconexión (bg=$_isInBackground)');
-              _wasPlayingBeforeInterruption = false;
-              _interruptionBeganAt = null;
-              _interruptionFallbackTimer = null;
-              _pendingReconnectAfterInterruption = true;
-              // Intentar siempre — el servicio ya está corriendo
-              await _doReconnectAfterInterruption();
-            }
-          });
         }
 
       } else {
-        // ── Fin de interrupción ──────────────────────────────────────────────
-        _interruptionFallbackTimer?.cancel();
-        _interruptionFallbackTimer = null;
+        // ── EL SISTEMA NOS DEVUELVE EL AUDIO ──────────────────────────────────
 
-        final duracion = _interruptionBeganAt != null
-            ? DateTime.now().difference(_interruptionBeganAt!)
-            : Duration.zero;
-        _interruptionBeganAt = null;
+        if (event.type == AudioInterruptionType.duck) {
+          debugPrint('[AudioSession] Fin ducking → OS sube el volumen (sin acción)');
+          _interruptionActive = false;
+          return;
+        }
 
-        debugPrint('[AudioSession] Fin interrupción — ${duracion.inSeconds}s — bg=$_isInBackground');
+        // Esto SOLO se dispara si la app que nos interrumpió cerró su proceso
+        // (Ej: el usuario colgó la llamada o terminó la nota de voz).
+        // NUNCA se dispara si el usuario sigue viendo YouTube o Spotify.
+        debugPrint('[AudioSession] Fin interrupción transitoria detectada');
 
         if (!mounted || !_wasPlayingBeforeInterruption) {
-          // No estaba sonando antes → no reconectar
           _wasPlayingBeforeInterruption = false;
           _isRestarting = false;
           _interruptionActive = false;
@@ -955,19 +1012,13 @@ class _RadioHomeState extends State<RadioHome>
         }
 
         _wasPlayingBeforeInterruption = false;
-        _isRestarting = false; // Asegurar limpieza
+        _isRestarting = false;
         _pendingReconnectAfterInterruption = true;
 
-        // Con androidStopForegroundOnPause:false el servicio de audio siempre está corriendo.
-        // Podemos reconectar desde BG directamente sin ForegroundServiceStartNotAllowedException.
-        if (_isInBackground) {
-          debugPrint('[AudioSession] BG → reconectando directamente (servicio activo)');
-        } else {
-          debugPrint('[AudioSession] FG → reconectando al live edge');
-        }
+        debugPrint('[AudioSession] La vía está libre → Reconectando al audio en vivo');
         await _doReconnectAfterInterruption();
       }
-    });  
+    });
   }
 
   void _showTimerAndAlarmDialog() {
@@ -1541,60 +1592,47 @@ class _RadioHomeState extends State<RadioHome>
                           const Divider(),
                           ListTile(
                               leading: Icon(Icons.language, color: iconColor),
-                              title: Text(t('menuWebsite'),
-                                  style: TextStyle(color: textColor)),
+                              title: Text(t('menuWebsite'), style: TextStyle(color: textColor)),
                               onTap: () {
                                 Navigator.pop(context);
-                                _openWebMode(
-                                    "https://www.igrejaprimitivadoutrinadivina.com/");
+                                _openWebMode(FirebaseRemoteConfig.instance.getString('url_website'));
                               }),
                           ListTile(
                               leading: Icon(Icons.audio_file, color: iconColor),
-                              title: Text(t('menuAudios'),
-                                  style: TextStyle(color: textColor)),
+                              title: Text(t('menuAudios'), style: TextStyle(color: textColor)),
                               onTap: () {
                                 Navigator.pop(context);
-                                _openWebMode(
-                                    "https://igrejaprimitivadoutrinadivina.com/internas/audios");
+                                _openWebMode(FirebaseRemoteConfig.instance.getString('url_audios'));
                               }),
                           ListTile(
-                              leading:
-                                  Icon(Icons.contact_mail, color: iconColor),
-                              title: Text(t('menuContact'),
-                                  style: TextStyle(color: textColor)),
+                              leading: Icon(Icons.contact_mail, color: iconColor),
+                              title: Text(t('menuContact'), style: TextStyle(color: textColor)),
                               onTap: () {
                                 Navigator.pop(context);
-                                _openWebMode(
-                                    "https://www.igrejaprimitivadoutrinadivina.com/contato");
+                                _openWebMode(FirebaseRemoteConfig.instance.getString('url_contacto'));
                               }),
                           ListTile(
                               leading: Icon(Icons.notes, color: iconColor),
-                              title: Text(t('menuPrayerRequests'),
-                                  style: TextStyle(color: textColor)),
+                              title: Text(t('menuPrayerRequests'), style: TextStyle(color: textColor)),
+                              subtitle: Text(t('menuPrayerRequestsSub'), style: TextStyle(color: textColor.withOpacity(0.6))),
                               onTap: () {
                                 Navigator.pop(context);
-                                _openWebMode(
-                                    "https://www.igrejaprimitivadoutrinadivina.com/recados");
+                                _openWebMode(FirebaseRemoteConfig.instance.getString('url_pedidos'));
                               }),
                           ListTile(
-                              leading:
-                                  Icon(Icons.location_on, color: iconColor),
-                              title: Text(t('menuAddresses'),
-                                  style: TextStyle(color: textColor)),
+                              leading: Icon(Icons.location_on, color: iconColor),
+                              title: Text(t('menuAddresses'), style: TextStyle(color: textColor)),
                               onTap: () {
                                 Navigator.pop(context);
-                                _openWebMode(
-                                    "https://igrejaprimitivadoutrinadivina.com/internas/enderecos-ipdd");
+                                _openWebMode(FirebaseRemoteConfig.instance.getString('url_direcciones'));
                               }),
                           ListTile(
-                              leading: Icon(Icons.volunteer_activism,
-                                  color: iconColor),
-                              title: Text(t('menuSupport'),
-                                  style: TextStyle(color: textColor)),
+                              leading: Icon(Icons.volunteer_activism, color: iconColor),
+                              title: Text(t('menuSupport'), style: TextStyle(color: textColor)),
+                              subtitle: Text(t('menuSupportSub'), style: TextStyle(color: textColor.withOpacity(0.6))),
                               onTap: () {
                                 Navigator.pop(context);
-                                _openWebMode(
-                                    "https://www.igrejaprimitivadoutrinadivina.com/internas/contas-bancarias");
+                                _openWebMode(FirebaseRemoteConfig.instance.getString('url_apoyo'));
                               }),
                           const Divider(),
                           ListTile(
@@ -2399,12 +2437,63 @@ class _RadioHomeState extends State<RadioHome>
             initialUrlRequest: URLRequest(url: WebUri(_currentWebUrl)),
             initialSettings: InAppWebViewSettings(
               javaScriptEnabled: true,
+              // CAMBIO 1: Evita que la web robe el audio al entrar o salir
+              mediaPlaybackRequiresUserGesture: true, 
+              allowsInlineMediaPlayback: true,
               useShouldOverrideUrlLoading: true,
               verticalScrollBarEnabled: true,
               disableVerticalScroll: false,
               transparentBackground: true,
             ),
-            onWebViewCreated: (controller) => _webViewController = controller,
+            
+            // CAMBIO 2: Solo pausamos la radio cuando la web pide el micrófono
+            onPermissionRequest: (controller, request) async {
+              
+              // Si la radio está sonando, LA PAUSAMOS en este momento exacto
+              if (_audioPlayer.playing) {
+                debugPrint('WEB: Petición de micro -> Pausando radio temporalmente');
+                // Usamos pause() para que puedan volver a darle Play si quieren
+                await _audioPlayer.pause(); 
+              }
+
+              // Pedimos el permiso a Android
+              var status = await Permission.microphone.status;
+              if (!status.isGranted) {
+                status = await Permission.microphone.request();
+              }
+
+              // Autorizamos o bloqueamos a la web según la respuesta del usuario
+              if (status.isGranted) {
+                return PermissionResponse(
+                  resources: request.resources,
+                  action: PermissionResponseAction.GRANT,
+                );
+              } 
+              
+              return PermissionResponse(
+                resources: request.resources,
+                action: PermissionResponseAction.DENY,
+              );
+            },
+
+            onWebViewCreated: (controller) {
+              _webViewController = controller;
+
+              // Canal de comunicación JS
+              controller.addJavaScriptHandler(
+                handlerName: 'controlRadio', 
+                callback: (args) {
+                  final data = args[0];
+                  if (data['action'] == 'pause' && _audioPlayer.playing) {
+                    debugPrint('WEB: Pausando radio para grabar');
+                    _audioPlayer.pause();
+                  } else if (data['action'] == 'play' && !_audioPlayer.playing) {
+                    debugPrint('WEB: Grabación finalizada, retomando radio');
+                    _audioPlayer.play();
+                  }
+                },
+              );
+            },
             shouldOverrideUrlLoading: (controller, navigationAction) async {
               final uri = navigationAction.request.url;
               if (uri != null &&
@@ -2931,28 +3020,35 @@ class _RadioHomeState extends State<RadioHome>
                                       2,
                                       t('menuWebsite'),
                                       () => _openWebMenuLink(
-                                          "https://www.igrejaprimitivadoutrinadivina.com/")),
+                                          FirebaseRemoteConfig.instance.getString('url_website'))),
                                 ),
                                 ...[
                                   _buildMenuSubItem(
                                       animation,
                                       3,
                                       t('menuAudios'),
-                                      "https://igrejaprimitivadoutrinadivina.com/internas/audios"),
-                                  _buildMenuSubItem(animation, 4, t('menuContact'),
-                                      "https://www.igrejaprimitivadoutrinadivina.com/contato"),
+                                      FirebaseRemoteConfig.instance.getString('url_audios')),
+                                  _buildMenuSubItem(
+                                      animation, 
+                                      4, 
+                                      t('menuContact'),
+                                      FirebaseRemoteConfig.instance.getString('url_contacto')),
                                   _buildMenuSubItem(
                                       animation,
                                       5,
                                       t('menuPrayerRequests'),
-                                      "https://www.igrejaprimitivadoutrinadivina.com/recados"),
-                                  _buildMenuSubItem(animation, 6, t('menuAddresses'),
-                                      "https://igrejaprimitivadoutrinadivina.com/internas/enderecos-ipdd"),
+                                      FirebaseRemoteConfig.instance.getString('url_pedidos'),
+                                      t('menuPrayerRequestsSub')),
+                                  _buildMenuSubItem(
+                                      animation, 
+                                      6, 
+                                      t('menuAddresses'),
+                                      FirebaseRemoteConfig.instance.getString('url_direcciones')),
                                   _buildMenuSubItem(
                                       animation,
                                       7,
                                       t('menuSupport'),
-                                      "https://www.igrejaprimitivadoutrinadivina.com/internas/contas-bancarias",
+                                      FirebaseRemoteConfig.instance.getString('url_apoyo'),
                                       "(${t('menuSupportSub')})"),
                                 ].map((item) => Padding(
                                     padding: const EdgeInsets.only(left: 28.0),
@@ -2988,6 +3084,7 @@ class _RadioHomeState extends State<RadioHome>
                                     });
                                   }),
                                 ),
+
                                 const SizedBox(height: 40),
                               ],
                             ),
@@ -3005,15 +3102,24 @@ class _RadioHomeState extends State<RadioHome>
     );
   }
 
-  void _openWebMenuLink(String url) {
+  void _openWebMenuLink(String url) async {
     if (!mounted || _isNavigating) return;
     _isNavigating = true;
-    Navigator.pop(context);
-    _openWebMode(url);
-    Future.delayed(const Duration(milliseconds: 500), () {
-      if (mounted) _isNavigating = false;
-    });
+    Navigator.pop(context); // Cierra el menú lateral
+
+    try {
+      _openWebMode(url); // Abre la pantalla web inmediatamente
+    } catch (e) {
+      debugPrint("Error: $e");
+    } finally {
+      Future.delayed(const Duration(milliseconds: 500), () {
+        if (mounted) _isNavigating = false;
+      });
+    }
   }
+
+
+
 
   Widget _buildStaggeredItem(Animation<double> animation, int index,
       {required Widget child}) {
