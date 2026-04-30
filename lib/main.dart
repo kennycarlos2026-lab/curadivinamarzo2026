@@ -49,6 +49,15 @@ final AudioPlayer _globalAudioPlayer = AudioPlayer();
 // Referencia global al handler
 _StopAsPauseHandler? _globalAudioHandler;
 
+/// Callback global para que el handler pueda forzar una URL fresca
+/// antes de reproducir desde la notificación (evita audio viejo).
+Future<void> Function()? _globalReinitAudio;
+
+/// Flag global: true mientras el sistema tiene una interrupción activa 
+/// (llamada entrante, timbre). Evita que stop() del handler destruya
+/// el AudioService durante una interrupción del sistema.
+bool _globalSystemInterruption = false;
+
 /// Handler que intercepta el comando stop() de la notificación
 /// y lo redirige a pause() para que la notificación no se destruya.
 class _StopAsPauseHandler extends BaseAudioHandler {
@@ -90,13 +99,33 @@ class _StopAsPauseHandler extends BaseAudioHandler {
   }
 
   @override
-  Future<void> play() => player.play();
+  Future<void> play() async {
+    // Siempre inicializamos con URL fresca (cache-busting) antes de reproducir.
+    // Esto asegura audio en vivo tanto desde la UI como desde la notificación.
+    if (_globalReinitAudio != null) {
+      await _globalReinitAudio!();
+    }
+    await player.play();
+  }
 
   @override
   Future<void> pause() => player.pause();
 
   @override
-  Future<void> stop() => player.pause(); // ← redirige stop → pause
+  Future<void> stop() async {
+    // Si el sistema tiene una interrupción activa (llamada, timbre),
+    // ignoramos este stop — el sistema lo envía para limpiar la notificación
+    // pero NO queremos destruir el AudioService porque vamos a reconectar.
+    if (_globalSystemInterruption) {
+      debugPrint('[Handler] stop() ignorado — interrupción del sistema activa');
+      await player.stop(); // solo detener el audio, sin tocar el servicio
+      return;
+    }
+    // Stop iniciado por el usuario: detener completamente y eliminar notificación
+    await player.stop();
+    mediaItem.add(null); // Limpiar metadata fuerza el cierre de la notificación
+    await super.stop(); // Notifica a AudioService que cierre el foreground service
+  }
 
   @override
   Future<void> seek(Duration position) => player.seek(position);
@@ -186,6 +215,17 @@ void main() async {
 
   // Captura errores de Dart fuera de Flutter
   PlatformDispatcher.instance.onError = (error, stack) {
+    final errStr = error.toString();
+
+    // FILTRO: Ignorar errores comunes de conectividad de just_audio
+    if (errStr.contains('Loading interrupted') ||
+        errStr.contains('abort') ||
+        errStr.contains('Source error') ||
+        errStr.contains('PlatformException(0')) {
+      debugPrint('Error de red/audio ignorado para Crashlytics: $errStr');
+      return true; // Retornar true evita que Crashlytics lo registre como fatal
+    }
+
     FirebaseCrashlytics.instance.recordError(error, stack, fatal: true);
     return true;
   };
@@ -251,6 +291,28 @@ void main() async {
     await AndroidAlarmManager.initialize();
   }
   try {
+    // ✅ Crear canal de notificación con visibilidad pública (pantalla bloqueada)
+    const String audioChannelId = 'com.kym.lavozdelacuradivina.radio.channel.audio';
+    const String audioChannelName = 'Radio A Voz da Cura Divina';
+    const String audioChannelDesc = 'Reproducción de radio en vivo';
+
+    final AndroidFlutterLocalNotificationsPlugin? androidImpl =
+        flutterLocalNotificationsPlugin.resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>();
+    if (androidImpl != null) {
+      await androidImpl.createNotificationChannel(
+        const AndroidNotificationChannel(
+          audioChannelId,
+          audioChannelName,
+          description: audioChannelDesc,
+          importance: Importance.high,
+          playSound: false,
+          enableVibration: false,
+          showBadge: false,
+        ),
+      );
+    }
+
     if (!kIsWeb) {
       await AudioService.init(
         builder: () {
@@ -258,12 +320,11 @@ void main() async {
           return _globalAudioHandler!;
         },
         config: const AudioServiceConfig(
-          androidNotificationChannelId:
-              'com.kym.lavozdelacuradivina.radio.channel.audio',
-          androidNotificationChannelName: 'Radio A Voz da Cura Divina',
-          notificationColor: Color(0xFF80DEEA),
+          androidNotificationChannelId: audioChannelId,
+          androidNotificationChannelName: audioChannelName,
+          notificationColor: Color(0xFF90C7F6),
           androidNotificationIcon: 'drawable/ic_stat_igual1',
-          androidStopForegroundOnPause: false,
+          androidStopForegroundOnPause: true,
         ),
       );
     }
@@ -358,6 +419,7 @@ class _RadioHomeState extends State<RadioHome>
   DateTime? _lastResumeAttemptAt;
   bool _isInBackground = false;
   bool _interruptionActive = false; // true mientras dure una llamada/timbrada
+  DateTime? _interruptionStartTime; // marca cuándo comenzó la interrupción
   // _isLiveEdgeMode es global (ver arriba de main()) — compartida con _StopAsPauseHandler
 
   // Web View State
@@ -464,6 +526,9 @@ class _RadioHomeState extends State<RadioHome>
 
   Future<void> _initializePlayer() async {
     _audioPlayer.setVolume(_volume);
+    // Registrar callback global para que el handler de notificación
+    // pueda forzar una URL fresca antes de reproducir.
+    _globalReinitAudio = _initializeAudio;
     _setupPlayerStateStream();
     try {
       await _initializeAudio();
@@ -639,6 +704,13 @@ class _RadioHomeState extends State<RadioHome>
     super.dispose();
   }
 
+  /// Verifica si la app tiene permiso del sistema para reproducir audio.
+  Future<bool> _canPlayAudio() async {
+    // Verificamos el estado interno para saber si tenemos el foco de audio.
+    // Si _interruptionActive es true, otra app tiene el foco.
+    return !_interruptionActive;
+  }
+
   void _setupConnectivityListener() {
     _connectivitySubscription?.cancel();
 
@@ -654,6 +726,16 @@ class _RadioHomeState extends State<RadioHome>
           _shouldResumeWhenNetworkReturns = true;
         }
         return;
+      }
+
+      // 🔥 Verificar foco de audio antes de intentar reconectar
+      if (_shouldResumeWhenNetworkReturns) {
+        final canPlay = await _canPlayAudio();
+        if (!canPlay) {
+          debugPrint('[Connectivity] Red OK pero NO tenemos foco → abortar reconexión');
+          _shouldResumeWhenNetworkReturns = false;
+          return;
+        }
       }
 
       if (!_shouldResumeWhenNetworkReturns) return;
@@ -679,9 +761,11 @@ class _RadioHomeState extends State<RadioHome>
 
       try {
         _isRestarting = true;
-        await _audioPlayer.pause(); 
-        await _initializeAudio();
-        if (mounted) await _audioPlayer.play();  // seguro siempre
+        // No hacer pause + setAudioSource si podemos simplemente play()
+        if (_audioPlayer.processingState == ProcessingState.idle) {
+          await _initializeAudio();
+        }
+        if (mounted) await _audioPlayer.play();
       } catch (e) {
         debugPrint('[Connectivity] Error al reconectar: $e');
         _shouldResumeWhenNetworkReturns = true;
@@ -818,28 +902,27 @@ class _RadioHomeState extends State<RadioHome>
       _wasManuallyPaused = false;
       try {
         await _audioPlayer.stop();
+        // ✅ Detener también el servicio de audio (elimina la notificación)
+        if (_globalAudioHandler != null) {
+          await _globalAudioHandler!.stop();
+        }
       } finally {
         _isRestarting = false;
       }
     } else {
-      // ── PLAY
+      // ── PLAY ─────────────────────────────────────────────────────────────────
       _isRestarting = true;
       try {
         if (mounted) setState(() { _isConnecting = true; _errorMessage = ''; });
         _bufferingWatchdog?.cancel();
         _bufferingWatchdog = null;
         _bufferingStartedAt = null;
-        // Restaurar volumen por si venía muteado del pause
-        _audioPlayer.setVolume(1.0);
-        if (_wasManuallyPaused) {
-          // Pausa manual: reiniciar completamente para audio fresco
-          _wasManuallyPaused = false;
-          debugPrint('[PlayStop] Post-pausa → reinit completo para audio live');
-          await _restartStream(force: true);
-        } else {
-          // Play normal: reconexion con URL fresca
-          await _restartStream(force: true);
-        }
+        _wasManuallyPaused = false;
+        _audioPlayer.setVolume(_volume);
+
+        // Siempre forzamos una nueva conexión para estar en el live edge
+        await _initializeAudio();
+
         if (mounted) {
           await _audioPlayer.play();
           _shouldResumeWhenNetworkReturns = true;
@@ -872,18 +955,17 @@ class _RadioHomeState extends State<RadioHome>
 
   /// Reconecta al live-edge después de una interrupción (llamada, timbrada, etc.).
   /// [fromLifecycle] indica si viene del evento didChangeAppLifecycleState.
+  /// Reconecta al live-edge después de una interrupción (llamada, timbrada, etc.).
+  /// [fromLifecycle] indica si viene del evento didChangeAppLifecycleState.
   Future<void> _doReconnectAfterInterruption({bool fromLifecycle = false}) async {
     if (!mounted) return;
     if (!_pendingReconnectAfterInterruption) return;
 
-    // Evitar doble-reconexión si ya hay una en curso.
-    // Excepción: si viene del lifecycle, tiene prioridad y puede override.
     if (_isRestarting && !fromLifecycle) {
       debugPrint('[Reconnect] Descartado — ya hay reconexión en curso');
       return;
     }
 
-    // Guard de duplicados solo para llamadas NO provenientes del lifecycle
     if (!fromLifecycle) {
       final now = DateTime.now();
       if (_lastResumeAttemptAt != null &&
@@ -893,14 +975,37 @@ class _RadioHomeState extends State<RadioHome>
       }
     }
 
+    // ✅ DOBLE VERIFICACIÓN PARA EVITAR EFECTOS SECUNDARIOS ✅
+    // 1. Verificar que el sistema nos ha devuelto el foco de audio.
+    //    Si otra app (ej. YouTube, una llamada contestada) lo tiene, esto será falso.
+    final canPlay = await _canPlayAudio();
+    if (!canPlay) {
+      debugPrint('[Reconnect] Abortado: el sistema no nos ha devuelto el foco de audio.');
+      // No limpiamos _pendingReconnectAfterInterruption. Se reintentará más tarde
+      // si el usuario vuelve a la app (lo que podría devolvernos el foco).
+      return;
+    }
+
+    // 2. Verificar la duración de la interrupción.
+    //    Si fue muy larga (>40s), asumimos que el usuario cambió de actividad.
+    final interruptionDuration = _interruptionStartTime != null
+        ? DateTime.now().difference(_interruptionStartTime!)
+        : Duration.zero;
+    if (interruptionDuration > const Duration(seconds: 40)) {
+      debugPrint('[Reconnect] Abortado: la interrupción fue demasiado larga (${interruptionDuration.inSeconds}s).');
+      _pendingReconnectAfterInterruption = false; // Limpiamos para no reintentar.
+      _wasPlayingBeforeInterruption = false;
+      return;
+    }
+    // ✅ FIN DE LA DOBLE VERIFICACIÓN ✅
+
     _pendingReconnectAfterInterruption = false;
-    // _interruptionActive se limpia en finally para proteger el stop/reinit interno
+    _wasPlayingBeforeInterruption = false; // Limpiar aquí — la interrupción ya terminó
     _lastResumeAttemptAt = DateTime.now();
-    debugPrint('[Reconnect] Iniciando (bg=$_isInBackground, fromLifecycle=$fromLifecycle)');
+    debugPrint('[Reconnect] Iniciando reconexión automática (bg=$_isInBackground, fromLifecycle=$fromLifecycle, duración=${interruptionDuration.inSeconds}s)');
     _isRestarting = true;
 
     try {
-      // Aseguramos que el player esté detenido antes de reconectar
       if (_audioPlayer.playing ||
           _audioPlayer.processingState == ProcessingState.loading ||
           _audioPlayer.processingState == ProcessingState.buffering) {
@@ -909,28 +1014,19 @@ class _RadioHomeState extends State<RadioHome>
 
       if (!mounted) return;
 
-      // Si hay otra interrupción activa recién llegada, abortar
-      if (fromLifecycle) _wasPlayingBeforeInterruption = false;
-      if (_wasPlayingBeforeInterruption && !fromLifecycle) {
-        debugPrint('[Reconnect] Nueva interrupción detectada → abortando');
-        _pendingReconnectAfterInterruption = true;
-        return;
-      }
-
-      // Reconectar con URL fresca (cache-busting en _initializeAudio)
       await _initializeAudio();
       if (mounted) {
         await _audioPlayer.play();
         _shouldResumeWhenNetworkReturns = true;
-        debugPrint('[Reconnect] ✓ Completado (bg=$_isInBackground)');
+        debugPrint('[Reconnect] ✓ Completado');
       }
     } catch (e) {
       debugPrint('[Reconnect] Error: $e');
-      // Reintentar en el próximo foreground
       _pendingReconnectAfterInterruption = true;
     } finally {
       _isRestarting = false;
-      _interruptionActive = false; // limpiar AQUÍ, tras completar stop+reinit
+      _interruptionActive = false;
+      _interruptionStartTime = null; // Limpiar el timestamp de la interrupción
     }
   }
 
@@ -965,6 +1061,8 @@ class _RadioHomeState extends State<RadioHome>
 
         // 2. Interrupciones reales (Llamadas, YouTube, Spotify, Notas de voz)
         _interruptionActive = true;
+        _globalSystemInterruption = true; // Proteger el AudioService durante la interrupción
+        _interruptionStartTime = DateTime.now(); // Marcar inicio de la interrupción
 
         final wasIntendingToPlay = _audioPlayer.playing ||
             _audioPlayer.processingState == ProcessingState.loading ||
@@ -977,11 +1075,9 @@ class _RadioHomeState extends State<RadioHome>
           _wasManuallyPaused = false;
           _stoppedByHeadphones = false;
 
-          debugPrint('[AudioSession] Interrupción externa → Cediendo el audio (Stop)');
+          debugPrint('[AudioSession] Interrupción externa → Pausando (stop)');
           _isRestarting = true;
           try {
-            // Nos detenemos por completo, sin temporizadores.
-            // Si es YouTube/Spotify, nos quedaremos así para siempre.
             await _audioPlayer.stop();
           } catch (e) {
             debugPrint('[AudioSession] Error en stop: $e');
@@ -991,18 +1087,21 @@ class _RadioHomeState extends State<RadioHome>
         }
 
       } else {
-        // ── EL SISTEMA NOS DEVUELVE EL AUDIO ──────────────────────────────────
-
+        // ── INTERRUPCIÓN FINALIZADA ──────────────────────────────────────────────
         if (event.type == AudioInterruptionType.duck) {
-          debugPrint('[AudioSession] Fin ducking → OS sube el volumen (sin acción)');
+          debugPrint('[AudioSession] Fin ducking');
           _interruptionActive = false;
           return;
         }
 
-        // Esto SOLO se dispara si la app que nos interrumpió cerró su proceso
-        // (Ej: el usuario colgó la llamada o terminó la nota de voz).
-        // NUNCA se dispara si el usuario sigue viendo YouTube o Spotify.
-        debugPrint('[AudioSession] Fin interrupción transitoria detectada');
+        debugPrint('[AudioSession] Fin interrupción');
+        final interruptionDuration = _interruptionStartTime != null
+            ? DateTime.now().difference(_interruptionStartTime!)
+            : Duration.zero;
+        _interruptionStartTime = null;
+
+        // Umbral para considerar interrupción "breve" (ej. timbre no atendido)
+        const autoResumeThreshold = Duration(seconds: 40);
 
         if (!mounted || !_wasPlayingBeforeInterruption) {
           _wasPlayingBeforeInterruption = false;
@@ -1011,12 +1110,25 @@ class _RadioHomeState extends State<RadioHome>
           return;
         }
 
-        _wasPlayingBeforeInterruption = false;
-        _isRestarting = false;
-        _pendingReconnectAfterInterruption = true;
-
-        debugPrint('[AudioSession] La vía está libre → Reconectando al audio en vivo');
-        await _doReconnectAfterInterruption();
+        if (interruptionDuration < autoResumeThreshold) {
+          debugPrint('[AudioSession] Interrupción breve (${interruptionDuration.inSeconds}s) → Intentando reconexión automática');
+          // Limpiar ANTES de llamar a _doReconnectAfterInterruption:
+          // - _interruptionActive=false para que _canPlayAudio() no bloquee
+          // - _globalSystemInterruption=false para que el handler funcione normal
+          // - _lastResumeAttemptAt=null para saltar el guard de 3s (cada timbre es un evento distinto)
+          _interruptionActive = false;
+          _globalSystemInterruption = false;
+          _lastResumeAttemptAt = null;
+          _pendingReconnectAfterInterruption = true;
+          await _doReconnectAfterInterruption();
+        } else {
+          debugPrint('[AudioSession] Interrupción larga (${interruptionDuration.inSeconds}s) → El usuario debe reanudar manualmente');
+          _wasPlayingBeforeInterruption = false;
+          _isRestarting = false;
+          _interruptionActive = false;
+          _globalSystemInterruption = false; // liberar el flag
+          _pendingReconnectAfterInterruption = false;
+        }
       }
     });
   }
@@ -1028,7 +1140,7 @@ class _RadioHomeState extends State<RadioHome>
       context: context,
       builder: (BuildContext context) {
         return SimpleDialog(
-          backgroundColor: _isDarkMode ? const Color(0xFF0A192F) : Colors.white,
+          backgroundColor: _isDarkMode ? const Color(0xFF183153) : Colors.white,
           title: Text(t('timerDialogTitle'),
               style: TextStyle(color: titleColor)),
           children: <Widget>[
@@ -1074,7 +1186,7 @@ class _RadioHomeState extends State<RadioHome>
       context: context,
       builder: (BuildContext context) {
         final textColor = _isDarkMode ? Colors.white : Colors.black;
-        final bgColor = _isDarkMode ? const Color(0xFF0A192F) : Colors.white;
+        final bgColor = _isDarkMode ? const Color(0xFF183153) : Colors.white;
         return AlertDialog(
           backgroundColor: bgColor,
           shape:
@@ -1262,7 +1374,7 @@ class _RadioHomeState extends State<RadioHome>
                     colorScheme: const ColorScheme.dark(
                       primary: Colors.blue,
                       onPrimary: Colors.white,
-                      surface: Color(0xFF0A192F),
+                      surface: Color(0xFF183153),
                       onSurface: Colors.white,
                     ),
                   )
@@ -1295,7 +1407,7 @@ class _RadioHomeState extends State<RadioHome>
         return StatefulBuilder(
           builder: (context, setDialogState) {
             final bgColor =
-                _isDarkMode ? const Color(0xFF0A192F) : Colors.white;
+                _isDarkMode ? const Color(0xFF183153) : Colors.white;
             final txtColor = _isDarkMode ? Colors.white : Colors.black;
             return AlertDialog(
               backgroundColor: bgColor,
@@ -2248,7 +2360,7 @@ class _RadioHomeState extends State<RadioHome>
   Widget build(BuildContext context) {
     final Color darkTopColor = const Color(0xFF0037DB);
     final Color baseBgColor =
-        _isDarkMode ? const Color(0xFF000D33) : const Color(0xFFB2EBF2);
+        _isDarkMode ? const Color(0xFF0A2254) : const Color(0xFFC8E4FB);
     final Color textColor = _isDarkMode ? Colors.blue.shade400 : Colors.black;
     final Color headerBgColor =
         _isDarkMode ? Colors.black : const Color.fromARGB(255, 255, 255, 255);
@@ -2269,7 +2381,7 @@ class _RadioHomeState extends State<RadioHome>
             const BoxShadow(
                 color: Colors.white, offset: Offset(-5, -5), blurRadius: 15),
             const BoxShadow(
-                color: Color(0xFF82B8C2), offset: Offset(5, 5), blurRadius: 15)
+                color: Color(0xFF72AADF), offset: Offset(5, 5), blurRadius: 15)
           ];
 
     if (_isInitialLoading)
@@ -2324,7 +2436,7 @@ class _RadioHomeState extends State<RadioHome>
                           darkTopColor.withOpacity(0.9),
                           baseBgColor
                         ]
-                      : [const Color(0xFF80DEEA), baseBgColor],
+                      : [const Color(0xFF90C7F6), baseBgColor],
                   begin: _isDarkMode ? Alignment.topCenter : Alignment.topLeft,
                   end: _isDarkMode
                       ? Alignment.bottomCenter
@@ -2383,6 +2495,8 @@ class _RadioHomeState extends State<RadioHome>
             ],
             if (_isWebMode) ...[
               Positioned.fill(
+                // En landscape (horizontal) quitamos el padding para que no quede franja blanca
+                bottom: MediaQuery.of(context).orientation == Orientation.landscape ? 0 : 160,
                 child: AnnotatedRegion<SystemUiOverlayStyle>(
                   value: _isDarkMode
                       ? SystemUiOverlayStyle.light.copyWith(
@@ -2397,24 +2511,19 @@ class _RadioHomeState extends State<RadioHome>
                           systemNavigationBarDividerColor: Colors.transparent,
                           systemNavigationBarContrastEnforced: false,
                         ),
-                  child: Container(
-                    color: _isDarkMode ? Colors.black : Colors.white,
-                    child: _buildWebView(),
-                  ),
+                  child: _buildWebView(),
                 ),
               ),
             ],
 
-            // CAPA 1: Mini reproductor
-            Positioned(
-              bottom: 60,
-              left: 16,
-              right: 16,
-              child: IgnorePointer(
-                ignoring: !_isWebMode,
-                child: _buildMiniPlayer(context, textColor, playIconColor),
+            // CAPA 1: Mini reproductor + Bottom nav (solo en modo web)
+            if (_isWebMode)
+              Positioned(
+                bottom: 0,
+                left: 0,
+                right: 0,
+                child: _buildWebBottomBar(context),
               ),
-            ),
           ],
         ),
       ),
@@ -2422,140 +2531,81 @@ class _RadioHomeState extends State<RadioHome>
   }
 
   Widget _buildWebView() {
-    final bottomPadding = MediaQuery.of(context).padding.bottom;
-    
-    // 1. Usamos los colores base oficiales de tu app
-    final webBaseColor = _isDarkMode 
-        ? const Color(0xFF000D33) // Azul oscuro
-        : const Color(0xFFB2EBF2); // Celeste claro
-
-    return Stack(
-      children: [
-        // WebView (La página web)
-        Positioned.fill(
-          child: InAppWebView(
-            initialUrlRequest: URLRequest(url: WebUri(_currentWebUrl)),
-            initialSettings: InAppWebViewSettings(
-              javaScriptEnabled: true,
-              // CAMBIO 1: Evita que la web robe el audio al entrar o salir
-              mediaPlaybackRequiresUserGesture: true, 
-              allowsInlineMediaPlayback: true,
-              useShouldOverrideUrlLoading: true,
-              verticalScrollBarEnabled: true,
-              disableVerticalScroll: false,
-              transparentBackground: true,
-            ),
-            
-            // CAMBIO 2: Solo pausamos la radio cuando la web pide el micrófono
-            onPermissionRequest: (controller, request) async {
-              
-              // Si la radio está sonando, LA PAUSAMOS en este momento exacto
-              if (_audioPlayer.playing) {
-                debugPrint('WEB: Petición de micro -> Pausando radio temporalmente');
-                // Usamos pause() para que puedan volver a darle Play si quieren
-                await _audioPlayer.pause(); 
+    return InAppWebView(
+      initialUrlRequest: URLRequest(url: WebUri(_currentWebUrl)),
+      initialSettings: InAppWebViewSettings(
+        javaScriptEnabled: true,
+        mediaPlaybackRequiresUserGesture: true,
+        allowsInlineMediaPlayback: true,
+        useShouldOverrideUrlLoading: true,
+        verticalScrollBarEnabled: true,
+        disableVerticalScroll: false,
+        transparentBackground: true,
+        forceDark: ForceDark.OFF,
+      ),
+      onPermissionRequest: (controller, request) async {
+        if (_audioPlayer.playing) {
+          debugPrint('WEB: Petición de micro -> Pausando radio temporalmente');
+          await _audioPlayer.pause();
+        }
+        var status = await Permission.microphone.status;
+        if (!status.isGranted) {
+          status = await Permission.microphone.request();
+        }
+        if (status.isGranted) {
+          return PermissionResponse(
+            resources: request.resources,
+            action: PermissionResponseAction.GRANT,
+          );
+        }
+        return PermissionResponse(
+          resources: request.resources,
+          action: PermissionResponseAction.DENY,
+        );
+      },
+      onWebViewCreated: (controller) {
+        _webViewController = controller;
+        controller.addJavaScriptHandler(
+          handlerName: 'controlRadio',
+          callback: (args) {
+            final data = args[0];
+            if (data['action'] == 'pause' && _audioPlayer.playing) {
+              debugPrint('WEB: Pausando radio para grabar');
+              _audioPlayer.pause();
+            } else if (data['action'] == 'play' && !_audioPlayer.playing) {
+              debugPrint('WEB: Grabación finalizada, retomando radio');
+              _audioPlayer.play();
+            }
+          },
+        );
+      },
+      shouldOverrideUrlLoading: (controller, navigationAction) async {
+        final uri = navigationAction.request.url;
+        if (uri != null && uri.scheme != "http" && uri.scheme != "https") {
+          await launchUrl(Uri.parse(uri.toString()),
+              mode: LaunchMode.externalApplication);
+          return NavigationActionPolicy.CANCEL;
+        }
+        return NavigationActionPolicy.ALLOW;
+      },
+      onLoadStop: (controller, url) async {
+        await controller.evaluateJavascript(source: """
+          (function() {
+            var style = document.createElement('style');
+            style.innerHTML = `
+              .player, #player, .maxcast-player, .maxcast-player-wrapper,
+              #maxcast-bar, iframe[src*="maxcast"], audio, video,
+              .repro-bottom, div[class*="player"] {
+                display: none !important;
               }
-
-              // Pedimos el permiso a Android
-              var status = await Permission.microphone.status;
-              if (!status.isGranted) {
-                status = await Permission.microphone.request();
-              }
-
-              // Autorizamos o bloqueamos a la web según la respuesta del usuario
-              if (status.isGranted) {
-                return PermissionResponse(
-                  resources: request.resources,
-                  action: PermissionResponseAction.GRANT,
-                );
-              } 
-              
-              return PermissionResponse(
-                resources: request.resources,
-                action: PermissionResponseAction.DENY,
-              );
-            },
-
-            onWebViewCreated: (controller) {
-              _webViewController = controller;
-
-              // Canal de comunicación JS
-              controller.addJavaScriptHandler(
-                handlerName: 'controlRadio', 
-                callback: (args) {
-                  final data = args[0];
-                  if (data['action'] == 'pause' && _audioPlayer.playing) {
-                    debugPrint('WEB: Pausando radio para grabar');
-                    _audioPlayer.pause();
-                  } else if (data['action'] == 'play' && !_audioPlayer.playing) {
-                    debugPrint('WEB: Grabación finalizada, retomando radio');
-                    _audioPlayer.play();
-                  }
-                },
-              );
-            },
-            shouldOverrideUrlLoading: (controller, navigationAction) async {
-              final uri = navigationAction.request.url;
-              if (uri != null &&
-                  uri.scheme != "http" &&
-                  uri.scheme != "https") {
-                await launchUrl(Uri.parse(uri.toString()),
-                    mode: LaunchMode.externalApplication);
-                return NavigationActionPolicy.CANCEL;
-              }
-              return NavigationActionPolicy.ALLOW;
-            },
-            onLoadStop: (controller, url) async {
-              // Solo dejamos el script para ocultar los reproductores de la web
-              await controller.evaluateJavascript(source: """
-                (function() {
-                  var style = document.createElement('style');
-                  style.innerHTML = `
-                    .player, #player, .maxcast-player, .maxcast-player-wrapper, 
-                    #maxcast-bar, iframe[src*="maxcast"], audio, video, 
-                    .repro-bottom, div[class*="player"] { 
-                      display: none !important; 
-                    }
-                  `;
-                  document.head.appendChild(style);
-                })();
-              """);
-            },
-          ),
-        ),
-
-        // 2. Capa Única: Desenfoque + Degradado a color base (Sin líneas)
-        Positioned(
-          bottom: 0,
-          left: 0,
-          right: 0,
-          child: ClipRect(
-            child: BackdropFilter(
-              // Desenfoque alto para que las letras web se vuelvan sombras irreconocibles
-              filter: ImageFilter.blur(sigmaX: 35.0, sigmaY: 35.0),
-              child: Container(
-                // Altura de 130 + padding para cubrir perfectamente el mini reproductor
-                height: bottomPadding + 130, 
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [
-                      Colors.transparent,
-                      webBaseColor.withOpacity(0.85), // Se mezcla con el color de tu app
-                      webBaseColor, // Termina en color sólido para máxima legibilidad
-                    ],
-                    stops: const [0.0, 0.45, 1.0], // Transición suave
-                  ),
-                  // ¡Se eliminó la propiedad border! Adiós a la línea negra fina.
-                ),
-              ),
-            ),
-          ),
-        ),
-      ],
+            `;
+            document.head.appendChild(style);
+          })();
+        """);
+      },
     );
   }
+
 
   Widget _buildEqualizerBars(Color barColor) {
     if (!_audioPlayer.playerState.playing) {
@@ -2597,306 +2647,454 @@ class _RadioHomeState extends State<RadioHome>
     );
   }
 
-  Widget _buildMiniPlayer(
-      BuildContext context, Color textColor, Color playIconColor) {
-    final playerBgColor = _isDarkMode
-        ? const Color(0xFF0A192F).withOpacity(0.50)
-        : const Color(0xFFB2EBF2).withOpacity(0.50);
+  // Barra inferior completa estilo Spotify: mini-player sólido + nav bar
+  Widget _buildWebBottomBar(BuildContext context) {
+    final bottomPadding = MediaQuery.of(context).padding.bottom;
+    final bgColor = _isDarkMode
+        ? const Color(0xFF0D1B2A) // azul noche sólido modo oscuro
+        : const Color(0xFFFFFFFF); // blanco puro modo claro
+    final dividerColor = _isDarkMode
+        ? Colors.white.withOpacity(0.08)
+        : Colors.black.withOpacity(0.08);
+    final rc = FirebaseRemoteConfig.instance;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // ── Mini-player ──────────────────────────────────────────────
+        _buildMiniPlayer(context, bgColor),
+        // ── Divisor sutil ────────────────────────────────────────────
+        Container(height: 1, color: dividerColor),
+        // ── Bottom Nav estilo Spotify ─────────────────────────────────
+        Container(
+          color: bgColor,
+          padding: EdgeInsets.only(
+            top: 6,
+            bottom: bottomPadding + 6,
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceAround,
+            children: [
+              _webNavItem(
+                icon: Icons.home_outlined,
+                label: t('menuWebsite'),
+                onTap: () {
+                  final url = rc.getString('url_website');
+                  setState(() => _currentWebUrl = url);
+                  _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+                },
+                bgColor: bgColor,
+              ),
+              _webNavItem(
+                icon: Icons.audio_file_outlined,
+                label: t('menuAudios'),
+                onTap: () {
+                  final url = rc.getString('url_audios');
+                  setState(() => _currentWebUrl = url);
+                  _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+                },
+                bgColor: bgColor,
+              ),
+              _webNavItem(
+                icon: Icons.notes_outlined,
+                label: t('menuPrayerRequests'),
+                onTap: () {
+                  final url = rc.getString('url_pedidos');
+                  setState(() => _currentWebUrl = url);
+                  _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+                },
+                bgColor: bgColor,
+              ),
+              _webNavItem(
+                icon: Icons.location_on_outlined,
+                label: t('menuAddresses'),
+                onTap: () {
+                  final url = rc.getString('url_direcciones');
+                  setState(() => _currentWebUrl = url);
+                  _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+                },
+                bgColor: bgColor,
+              ),
+              _webNavItem(
+                icon: Icons.volunteer_activism_outlined,
+                label: t('menuSupport'),
+                onTap: () {
+                  final url = rc.getString('url_apoyo');
+                  setState(() => _currentWebUrl = url);
+                  _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+                },
+                bgColor: bgColor,
+              ),
+              _webNavItem(
+                icon: Icons.close,
+                label: 'Radio',
+                onTap: () => setState(() => _isWebMode = false),
+                bgColor: bgColor,
+                isClose: true,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _webNavItem({
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+    required Color bgColor,
+    bool isClose = false,
+  }) {
+    final iconColor = _isDarkMode
+        ? (isClose ? Colors.redAccent.shade100 : Colors.white70)
+        : (isClose ? Colors.redAccent : Colors.black54);
+    final labelColor = _isDarkMode
+        ? (isClose ? Colors.redAccent.shade100 : Colors.white60)
+        : (isClose ? Colors.redAccent : Colors.black45);
+
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: iconColor, size: 22),
+            const SizedBox(height: 3),
+            Text(
+              label,
+              style: TextStyle(
+                color: labelColor,
+                fontSize: 9,
+                fontWeight: FontWeight.w500,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMiniPlayer(BuildContext context, Color bgColor) {
     final contrastColor = _isDarkMode ? Colors.white : Colors.black;
-    final secondaryTextColor = _isDarkMode ? Colors.white70 : Colors.black87;
+    final secondaryTextColor = _isDarkMode
+        ? Colors.white.withOpacity(0.55)
+        : Colors.black.withOpacity(0.50);
+    final accentColor = _isDarkMode
+        ? const Color(0xFF4A90D9)
+        : const Color(0xFF1D72C8);
 
     final isLandscape =
         MediaQuery.of(context).orientation == Orientation.landscape;
     if (isLandscape && _isWebMode) {
-      return Align(
-        alignment: Alignment.centerRight,
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(20),
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-            child: Container(
-              width: 52,
-              margin: const EdgeInsets.only(
-                  right: 34), // Un poco más separado para asegurar visibilidad
-              padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
-              decoration: BoxDecoration(
-                color: playerBgColor,
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: Colors.white.withOpacity(0.12)),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.4),
-                    blurRadius: 16,
-                    offset: const Offset(0, 4),
+      // ── Landscape: barra horizontal completa ──
+      return Container(
+        color: bgColor,
+        padding: const EdgeInsets.fromLTRB(12, 6, 12, 0), // Ajustado bottom a 0
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            // Artwork
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Image.asset(
+                'assets/iconolavoz.webp',
+                width: 44,
+                height: 44,
+                fit: BoxFit.cover,
+                filterQuality: FilterQuality.high,
+              ),
+            ),
+            const SizedBox(width: 10),
+
+            // Título + subtítulo
+            Expanded(
+              flex: 3,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'A Voz Da Cura Divina',
+                    style: TextStyle(
+                      color: contrastColor,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13,
+                      letterSpacing: -0.2,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    _marqueeText.isNotEmpty
+                        ? _marqueeText
+                        : 'Igreja Primitiva Doutrina Divina',
+                    style: TextStyle(color: secondaryTextColor, fontSize: 11),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ],
               ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  GestureDetector(
-                    onTap: _playOrStopStream,
-                    child: Container(
-                      width: 36,
-                      height: 36,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: contrastColor.withOpacity(0.1),
+            ),
+            const SizedBox(width: 10),
+
+            // Ecualizador animado
+            _buildEqualizerBars(accentColor),
+            const SizedBox(width: 10),
+
+            // Botón play/stop circular
+            GestureDetector(
+              onTap: _playOrStopStream,
+              child: Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: accentColor,
+                ),
+                child: _isConnecting
+                    ? Padding(
+                        padding: const EdgeInsets.all(9),
+                        child: LoadingAnimationWidget.staggeredDotsWave(
+                            color: Colors.white, size: 16),
+                      )
+                    : Icon(
+                        _audioPlayer.playerState.playing
+                            ? Icons.stop_rounded
+                            : Icons.play_arrow_rounded,
+                        color: Colors.white,
+                        size: 22,
                       ),
-                      child: _isConnecting
-                          ? LoadingAnimationWidget.staggeredDotsWave(
-                              color: contrastColor, size: 18)
-                          : Icon(
-                              _audioPlayer.playerState.playing
-                                  ? Icons.stop
-                                  : Icons.play_arrow,
-                              color: contrastColor,
-                              size: 22,
-                            ),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Container(
-                    height: 1,
-                    width: 28,
-                    color: contrastColor.withOpacity(0.2),
-                  ),
-                  const SizedBox(height: 10),
-                  GestureDetector(
-                    onTap: () => setState(() => _isWebMode = false),
-                    child: Icon(
-                      Icons.keyboard_double_arrow_right,
-                      color: contrastColor.withOpacity(0.8),
-                      size: 22,
+              ),
+            ),
+            const SizedBox(width: 10),
+
+            // Marquee de metadatos ICY
+            Expanded(
+              flex: 4,
+              child: Row(
+                children: [
+                  const _BlinkingLiveIndicator(),
+                  const SizedBox(width: 5),
+                  Icon(Icons.sensors, color: accentColor.withOpacity(0.7), size: 13),
+                  const SizedBox(width: 5),
+                  Expanded(
+                    child: SizedBox(
+                      height: 14,
+                      child: Marquee(
+                        text: _marqueeText.isNotEmpty
+                            ? _marqueeText
+                            : 'A Voz da Cura Divina no Ar',
+                        style: TextStyle(
+                          color: secondaryTextColor,
+                          fontSize: 11,
+                        ),
+                        scrollAxis: Axis.horizontal,
+                        velocity: 30.0,
+                        blankSpace: 80.0,
+                        pauseAfterRound: const Duration(seconds: 2),
+                      ),
                     ),
                   ),
                 ],
               ),
             ),
-          ),
+            const SizedBox(width: 10),
+
+            // Volumen: ícono + slider horizontal
+            Icon(
+              _volume == 0 ? Icons.volume_off : Icons.volume_up,
+              color: accentColor,
+              size: 16,
+            ),
+            SizedBox(
+              width: 80,
+              child: SliderTheme(
+                data: SliderTheme.of(context).copyWith(
+                  trackHeight: 2,
+                  thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 4),
+                  overlayShape: const RoundSliderOverlayShape(overlayRadius: 8),
+                  activeTrackColor: accentColor,
+                  inactiveTrackColor: contrastColor.withOpacity(0.15),
+                  thumbColor: accentColor,
+                ),
+                child: Slider(
+                  value: _volume,
+                  min: 0.0,
+                  max: 1.0,
+                  onChanged: (val) {
+                    setState(() => _volume = val);
+                    _audioPlayer.setVolume(val);
+                  },
+                ),
+              ),
+            ),
+          ],
         ),
       );
     }
 
-    return AnimatedSlide(
-      offset: _isWebMode ? Offset.zero : const Offset(0, 2),
-      duration: const Duration(milliseconds: 350),
-      curve: Curves.easeOutCubic,
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(28),
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 25, sigmaY: 25),
-          child: Container(
-            decoration: BoxDecoration(
-              color: playerBgColor,
-              borderRadius: BorderRadius.circular(28),
-              border: Border.all(color: Colors.white.withOpacity(0.12)),
-              boxShadow: [
-                BoxShadow(
-                  color: _isDarkMode
-                      ? Colors.black.withOpacity(0.6)
-                      : const Color(0xFF7FB3BF).withOpacity(0.7),
-                  blurRadius: 22,
-                  spreadRadius: 3,
-                  offset: const Offset(0, 4),
+    // ── Portrait: mini-player sólido borde a borde ───────────────────
+    return Container(
+      color: bgColor,
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Fila principal: artwork | info+controls | logo+close
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              // Artwork
+              ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: Image.asset(
+                  'assets/iconolavoz.webp',
+                  width: 52,
+                  height: 52,
+                  fit: BoxFit.cover,
+                  filterQuality: FilterQuality.high,
                 ),
-                BoxShadow(
-                  color: _isDarkMode
-                      ? Colors.black.withOpacity(0.3)
-                      : const Color(0xFF5A9BAA).withOpacity(0.4),
-                  blurRadius: 40,
-                  spreadRadius: -2,
-                  offset: const Offset(0, 8),
-                ),
-              ],
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // PESTAÑA SUPERIOR — flecha apuntando ARRIBA, toca para colapsar
-                GestureDetector(
-                  onTap: () => setState(() => _isWebMode = false),
-                  child: Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(vertical: 6),
-                    child: Icon(
-                      Icons.keyboard_arrow_up,
-                      color: contrastColor.withOpacity(0.8),
-                      size: 22,
-                    ),
-                  ),
-                ),
+              ),
+              const SizedBox(width: 10),
 
-                // SECCIÓN CENTRAL
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      // Icono de la radio con bordes redondeados (ahora clicable para colapsar)
-                      GestureDetector(
-                        onTap: () => setState(() => _isWebMode = false),
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(14),
-                          child: Image.asset(
-                            'assets/iconolavoz.webp',
-                            width: 65,
-                            height: 65,
-                            fit: BoxFit.contain,
-                            filterQuality: FilterQuality.high,
-                          ),
-                        ),
+              // Info central
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'A Voz Da Cura Divina',
+                      style: TextStyle(
+                        color: contrastColor,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
+                        letterSpacing: -0.2,
                       ),
-                      const SizedBox(width: 10),
-
-                      // Info central + play + ecualizador
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'A Voz Da Cura Divina',
-                              style: TextStyle(
-                                color: contrastColor,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 13,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            Text(
-                              'Igreja Primitiva Doutrina Divina',
-                              style: TextStyle(
-                                color: secondaryTextColor,
-                                fontSize: 11,
-                              ),
-                            ),
-                            const SizedBox(height: 6),
-                            Row(
-                              children: [
-                                // Botón play/stop circular
-                                GestureDetector(
-                                  onTap: _playOrStopStream,
-                                  child: Container(
-                                    width: 36,
-                                    height: 36,
-                                    decoration: BoxDecoration(
-                                      shape: BoxShape.circle,
-                                      color: contrastColor.withOpacity(0.1),
-                                    ),
-                                    child: Icon(
-                                      _audioPlayer.playerState.playing
-                                          ? Icons.stop
-                                          : Icons.play_arrow,
-                                      color: contrastColor,
-                                      size: 22,
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                // 5 barras animadas de ecualizador
-                                _buildEqualizerBars(contrastColor),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
-
-                      // Columna lateral derecha: Logos + Flecha colapso rápida
-                      GestureDetector(
-                        onTap: () => setState(() => _isWebMode = false),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Image.asset(
-                              'assets/nuevologoblanco.png',
-                              width: 31, // 30% más pequeño (antes 44)
-                              height: 31,
-                              fit: BoxFit.contain,
-                              filterQuality: FilterQuality.high,
-                            ),
-                            const SizedBox(height: 2),
-                            Icon(
-                              Icons.keyboard_double_arrow_up,
-                              color: contrastColor.withOpacity(0.9),
-                              size: 20,
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-
-                // BARRA DE VOLUMEN
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
-                  child: SliderTheme(
-                    data: SliderTheme.of(context).copyWith(
-                      trackHeight: 3,
-                      thumbShape:
-                          const RoundSliderThumbShape(enabledThumbRadius: 6),
-                      overlayShape:
-                          const RoundSliderOverlayShape(overlayRadius: 12),
-                      activeTrackColor: contrastColor,
-                      inactiveTrackColor: contrastColor.withOpacity(0.2),
-                      thumbColor: contrastColor,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
-                    child: Slider(
-                      value: _volume,
-                      min: 0.0,
-                      max: 1.0,
-                      onChanged: (val) {
-                        setState(() => _volume = val);
-                        _audioPlayer.setVolume(val);
-                      },
+                    const SizedBox(height: 2),
+                    Text(
+                      _marqueeText.isNotEmpty
+                          ? _marqueeText
+                          : 'Igreja Primitiva Doutrina Divina',
+                      style: TextStyle(color: secondaryTextColor, fontSize: 11),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
-                  ),
+                  ],
                 ),
+              ),
+              const SizedBox(width: 8),
 
-                // FRANJA INFERIOR — marquee con icono de live
-                Container(
-                  width: double.infinity,
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              // Ecualizador mini
+              _buildEqualizerBars(accentColor),
+              const SizedBox(width: 10),
+
+              // Botón play/stop
+              GestureDetector(
+                onTap: _playOrStopStream,
+                child: Container(
+                  width: 42,
+                  height: 42,
                   decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.8), // 80% de opacidad (bajado un 20%)
-                    borderRadius: const BorderRadius.only(
-                      bottomLeft: Radius.circular(28),
-                      bottomRight: Radius.circular(28),
-                    ),
+                    shape: BoxShape.circle,
+                    color: accentColor,
                   ),
-                  child: Row(
-                    children: [
-                      const _BlinkingLiveIndicator(),
-                      const SizedBox(width: 6),
-                      const Icon(Icons.sensors,
-                          color: Colors.white70, size: 14),
-                      const SizedBox(width: 6),
-                      Expanded(
-                        child: SizedBox(
-                          height: 15,
-                          child: Marquee(
-                            text: _marqueeText.isNotEmpty
-                                ? _marqueeText
-                                : 'A Voz da Cura Divina no Ar',
-                            style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 11),
-                            scrollAxis: Axis.horizontal,
-                            velocity: 30.0,
-                            blankSpace: 80.0,
-                            pauseAfterRound: const Duration(seconds: 2),
-                          ),
+                  child: _isConnecting
+                      ? Padding(
+                          padding: const EdgeInsets.all(10),
+                          child: LoadingAnimationWidget.staggeredDotsWave(
+                              color: Colors.white, size: 18),
+                        )
+                      : Icon(
+                          _audioPlayer.playerState.playing
+                              ? Icons.stop_rounded
+                              : Icons.play_arrow_rounded,
+                          color: Colors.white,
+                          size: 24,
+                        ),
+                ),
+              ),
+              const SizedBox(width: 8),
+
+              // Volumen compacto vertical: ícono + slider rotado
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    _volume == 0 ? Icons.volume_off : Icons.volume_up,
+                    color: accentColor,
+                    size: 16,
+                  ),
+                  const SizedBox(height: 2),
+                  RotatedBox(
+                    quarterTurns: 3,
+                    child: SliderTheme(
+                      data: SliderTheme.of(context).copyWith(
+                        trackHeight: 2,
+                        thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 4),
+                        overlayShape: const RoundSliderOverlayShape(overlayRadius: 8),
+                        activeTrackColor: accentColor,
+                        inactiveTrackColor: contrastColor.withOpacity(0.15),
+                        thumbColor: accentColor,
+                      ),
+                      child: SizedBox(
+                        width: 44,
+                        child: Slider(
+                          value: _volume,
+                          min: 0.0,
+                          max: 1.0,
+                          onChanged: (val) {
+                            setState(() => _volume = val);
+                            _audioPlayer.setVolume(val);
+                          },
                         ),
                       ),
-                    ],
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 4),
+
+          // Marquee de metadatos ICY
+          Row(
+            children: [
+              const _BlinkingLiveIndicator(),
+              const SizedBox(width: 5),
+              Icon(Icons.sensors, color: accentColor.withOpacity(0.7), size: 13),
+              const SizedBox(width: 5),
+              Expanded(
+                child: SizedBox(
+                  height: 14,
+                  child: Marquee(
+                    text: _marqueeText.isNotEmpty
+                        ? _marqueeText
+                        : 'A Voz da Cura Divina no Ar',
+                    style: TextStyle(
+                      color: secondaryTextColor,
+                      fontSize: 11,
+                    ),
+                    scrollAxis: Axis.horizontal,
+                    velocity: 30.0,
+                    blankSpace: 80.0,
+                    pauseAfterRound: const Duration(seconds: 2),
                   ),
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
-        ),
+        ],
       ),
     );
   }
@@ -2932,8 +3130,8 @@ class _RadioHomeState extends State<RadioHome>
         Offset activeCenter = isClosing ? endCenter : startCenter;
 
         final overlayBgColors = _isDarkMode
-            ? const Color(0xFF0A192F).withOpacity(0.88)
-            : const Color(0xFF80DEEA).withOpacity(0.85);
+            ? const Color(0xFF183153).withOpacity(0.88)
+            : const Color(0xFF90C7F6).withOpacity(0.85);
 
         return ClipPath(
           clipper: _CircularRevealClipper(
@@ -3001,7 +3199,7 @@ class _RadioHomeState extends State<RadioHome>
                                     style: GoogleFonts.inter(
                                         fontSize: 15,
                                         fontWeight: FontWeight.w600,
-                                        color: const Color(0xFF4E7F8E))),
+                                        color: const Color(0xFF4E87C0))),
                               ],
                             ),
                           ),
@@ -3198,7 +3396,7 @@ class _RadioHomeState extends State<RadioHome>
                     fontWeight: FontWeight.w700,
                     letterSpacing: -0.5,
                     height: 1.05,
-                    color: const Color(0xFF4E7F8E), // azul grisáceo
+                    color: const Color(0xFF4E87C0), // azul grisáceo
                   ),
                 ),
                 if (subText != null) ...[
@@ -3209,7 +3407,7 @@ class _RadioHomeState extends State<RadioHome>
                       fontSize: 16,
                       fontWeight: FontWeight.w400,
                       color: _isDarkMode
-                          ? const Color(0xFF8BB1BC).withOpacity(0.5)
+                          ? const Color(0xFF88B5E0).withOpacity(0.5)
                           : Colors.black.withOpacity(0.40),
                     ),
                   ),
@@ -3248,7 +3446,7 @@ class _RadioHomeState extends State<RadioHome>
                     height: 1.05,
                     color: _isDarkMode
                         ? const Color(
-                            0xFF8BB1BC) // Tonalidad más clara del azul grisáceo
+                            0xFF88B5E0) // Tonalidad más clara del azul grisáceo
                         : Colors.black.withOpacity(0.75),
                   ),
                 ),
@@ -3260,7 +3458,7 @@ class _RadioHomeState extends State<RadioHome>
                       fontSize: 13,
                       fontWeight: FontWeight.w400,
                       color: _isDarkMode
-                          ? const Color(0xFF8BB1BC).withOpacity(0.5)
+                          ? const Color(0xFF88B5E0).withOpacity(0.5)
                           : Colors.black.withOpacity(0.35),
                     ),
                   ),
@@ -3397,7 +3595,7 @@ class _CustomSwitch extends StatelessWidget {
     const double width = 60.0;
     const double height = 30.0;
     const double thumbSize = 24.0;
-    final bgColor = isDarkMode ? const Color(0xFF0A192F) : Colors.black;
+    final bgColor = isDarkMode ? const Color(0xFF183153) : Colors.black;
     final neumorphicShadows = isDarkMode
         ? [
             const BoxShadow(
@@ -3483,3 +3681,4 @@ class _CircularRevealClipper extends CustomClipper<Path> {
     return oldClipper.fraction != fraction || oldClipper.center != center;
   }
 }
+
