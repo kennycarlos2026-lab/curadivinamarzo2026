@@ -2581,11 +2581,27 @@ class _RadioHomeState extends State<RadioHome>
       },
       shouldOverrideUrlLoading: (controller, navigationAction) async {
         final uri = navigationAction.request.url;
-        if (uri != null && uri.scheme != "http" && uri.scheme != "https") {
-          await launchUrl(Uri.parse(uri.toString()),
-              mode: LaunchMode.externalApplication);
+        if (uri == null) return NavigationActionPolicy.ALLOW;
+        final String urlString = uri.toString();
+
+        // Interceptar enlaces de Google Play (tanto https como market://)
+        if (urlString.contains('play.google.com') || urlString.startsWith('market://')) {
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
           return NavigationActionPolicy.CANCEL;
         }
+
+        // Interceptar descargas de APK (opcional pero recomendado)
+        if (urlString.endsWith('.apk')) {
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+          return NavigationActionPolicy.CANCEL;
+        }
+
+        // Comportamiento original para esquemas no http/https
+        if (uri.scheme != "http" && uri.scheme != "https") {
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+          return NavigationActionPolicy.CANCEL;
+        }
+
         return NavigationActionPolicy.ALLOW;
       },
       onLoadStop: (controller, url) async {
